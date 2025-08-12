@@ -386,3 +386,39 @@ def generate_trade_orders(
             orders.append(order)
             
     return {"trades": orders}
+
+@tool("DesignMomentumStrategy")
+def design_momentum_strategy(asset_prices: pd.DataFrame, lookback_period: int = 252) -> Dict[str, Any]:
+    """
+    Screens a universe of assets to find the best candidates for a momentum strategy.
+    It ranks assets based on their total return over a specified lookback period.
+    """
+    # ### THE FIX: Relax the data requirement check ###
+    # We'll check for a reasonable number of days (e.g., > 200) instead of a strict 252.
+    if asset_prices.empty or len(asset_prices) < 200:
+        return {"success": False, "error": f"Insufficient price data. At least 200 days are required."}
+
+    # Also, ensure the lookback period isn't longer than the data we have.
+    actual_lookback = min(lookback_period, len(asset_prices) - 1)
+
+    # Calculate the total return over the lookback period
+    returns = asset_prices.pct_change().dropna()
+    
+    momentum_scores = (1 + returns.tail(actual_lookback)).prod() - 1
+    
+    # Rank the assets from highest momentum to lowest
+    ranked_assets = momentum_scores.sort_values(ascending=False)
+    
+    candidates = []
+    for ticker, score in ranked_assets.items():
+        if score > 0:
+            candidates.append({"ticker": str(ticker), "momentum_score_pct": round(score * 100, 2)})
+
+    if not candidates:
+        return {"success": False, "error": "No assets with positive momentum were found in the lookback period."}
+
+    return {
+        "success": True,
+        "strategy_type": "Momentum",
+        "candidates": candidates
+    }

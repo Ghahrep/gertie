@@ -1,9 +1,9 @@
 # in agents/orchestrator.py
 import re
-from typing import Dict, Any, Set, Optional
-from db import crud
+import json
+from typing import Dict, Any, Set, Optional, List
 
-# Import all the specialist agents
+# Agent Imports
 from agents.quantitative_analyst import QuantitativeAnalystAgent
 from agents.strategy_architect import StrategyArchitectAgent
 from agents.strategy_rebalancing import StrategyRebalancingAgent
@@ -11,114 +11,191 @@ from agents.hedging_strategist import HedgingStrategistAgent
 from agents.strategy_backtester import StrategyBacktesterAgent
 from agents.financial_tutor import FinancialTutorAgent
 from agents.regime_forecasting_agent import RegimeForecastingAgent
-from core.data_handler import get_market_data_for_portfolio
+from agents.behavioral_finance_agent import BehavioralFinanceAgent
+from agents.scenario_simulation_agent import ScenarioSimulationAgent
+from agents.conversation_manager import AutoGenConversationManager
 
-# We will add this agent in a future step, but can define it now.
-# from agents.financial_tutor import FinancialTutorAgent 
+# Backend Imports
+from db import crud
+from core.data_handler import get_market_data_for_portfolio
+import anthropic
+from core.config import settings
+
 
 class FinancialOrchestrator:
     """
-    ### UPGRADED: Uses a more sophisticated, prioritized routing logic.
+    The central command hub for the agent team. Can create and execute 
+    multi-step plans for complex queries or route simple queries directly.
     """
     def __init__(self):
         self.roster = {
-            "QuantitativeAnalyst": QuantitativeAnalystAgent(),
-            "StrategyArchitect": StrategyArchitectAgent(),
-            "StrategyRebalancing": StrategyRebalancingAgent(),
-            "HedgingStrategist": HedgingStrategistAgent(),
-            "StrategyBacktester": StrategyBacktesterAgent(),
+            "QuantitativeAnalystAgent": QuantitativeAnalystAgent(),
+            "StrategyArchitectAgent": StrategyArchitectAgent(),
+            "StrategyRebalancingAgent": StrategyRebalancingAgent(),
+            "HedgingStrategistAgent": HedgingStrategistAgent(),
+            "StrategyBacktesterAgent": StrategyBacktesterAgent(),
+            "FinancialTutorAgent": FinancialTutorAgent(),
             "RegimeForecastingAgent": RegimeForecastingAgent(),
-            "FinancialTutor": FinancialTutorAgent(),
+            "BehavioralFinanceAgent": BehavioralFinanceAgent(),
+            "ScenarioSimulationAgent": ScenarioSimulationAgent(),
         }
         print(f"FinancialOrchestrator initialized with a team of {len(self.roster)} agents.")
         self._setup_classification_patterns()
+        self.anthropic_client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
 
     def _setup_classification_patterns(self):
-        """
-        ### IMPROVEMENT: More comprehensive and distinct keyword sets.
-        """
+        """Setup prioritized keyword sets for routing."""
         self.routing_map = {
-            "StrategyRebalancing": {frozenset(["rebalance"]), frozenset(["optimize"]), frozenset(["allocation"]), frozenset(["risk", "parity"]), frozenset(["diversify", "risk"])},
-            "StrategyBacktester": {frozenset(["backtest"]), frozenset(["test", "strategy"])},
-            "HedgingStrategist": {frozenset(["hedge"]), frozenset(["protect"]), frozenset(["target", "volatility"])},
-            "StrategyArchitect": {frozenset(["design"]), frozenset(["find", "strategy"]), frozenset(["recommend"])},
-            "FinancialTutor": {frozenset(["explain"]), frozenset(["what", "is"]), frozenset(["define"]), frozenset(["learn"])},
+            "StrategyRebalancingAgent": {frozenset(["rebalance"]), frozenset(["optimize"]), frozenset(["allocation"]), frozenset(["risk", "parity"]), frozenset(["diversify", "risk"])},
+            "StrategyBacktesterAgent": {frozenset(["backtest"]), frozenset(["test", "strategy"])},
+            "HedgingStrategistAgent": {frozenset(["hedge"]), frozenset(["protect"]), frozenset(["target", "volatility"])},
+            "StrategyArchitectAgent": {frozenset(["design"]), frozenset(["find", "strategy"]), frozenset(["recommend"]), frozenset(["momentum"])},
             "RegimeForecastingAgent": {frozenset(["forecast"]), frozenset(["regime", "change"]), frozenset(["transition"])},
-            "QuantitativeAnalyst": {
-                frozenset(["risk"]), frozenset(["report"]), frozenset(["factor"]), 
-                frozenset(["alpha"]), frozenset(["cvar"]), frozenset(["analyze"]),
-                frozenset(["stress", "test"]), frozenset(["tail", "risk"])
-            }
+            "BehavioralFinanceAgent": {frozenset(["bias"]), frozenset(["biases"]), frozenset(["behavior"]), frozenset(["psychology"])},
+            "ScenarioSimulationAgent": {frozenset(["scenario"]), frozenset(["simulate"]), frozenset(["what", "if"]), frozenset(["market", "crash"])},
+            "FinancialTutorAgent": {frozenset(["explain"]), frozenset(["what", "is"]), frozenset(["define"]), frozenset(["learn"])},
+            "QuantitativeAnalystAgent": {frozenset(["risk"]), frozenset(["report"]), frozenset(["factor"]), frozenset(["alpha"]), frozenset(["cvar"]), frozenset(["analyze"]), frozenset(["stress", "test"]), frozenset(["tail", "risk"])}
         }
+    
+    def _create_execution_plan(self, user_query: str) -> Optional[List[Dict[str, str]]]:
+        """Uses an LLM to decompose a complex query into a sequence of agent tasks."""
+        print("Orchestrator: Query is complex. Engaging LLM to create an execution plan...")
+        
+        agent_descriptions = "\n".join([f"- **{agent.name}**: {agent.purpose}" for agent in self.roster.values()])
+        
+        prompt = f"""
+        You are an expert financial orchestrator. Your job is to decompose a user's complex financial query into a logical, sequential plan of discrete steps. Each step must be assigned to the single best specialist agent from the available team.
 
-    def _classify_query(self, query_words: Set[str]) -> Optional[str]:
+        Here is the team of specialist agents you can use. You MUST use these exact names:
+        {agent_descriptions}
+
+        Here is the user's query: "{user_query}"
+
+        Analyze the query and create a JSON array of steps. Each step in the array should be a JSON object with two keys: "agent" and "query".
+
+        CRITICAL RULES:
+        - You MUST respond with ONLY a valid JSON object containing a single key "plan".
+        - The "agent" value in each step MUST EXACTLY MATCH one of the names from the list provided (e.g., 'QuantitativeAnalystAgent', 'StrategyRebalancingAgent'). Do NOT shorten the names.
+        - The "query" value for each step should be a clear, self-contained instruction for that agent.
+
+        Now, create the plan for the user's actual query.
         """
-        Classifies the query and returns the name of the best agent to handle it.
-        This version prioritizes the order defined in the routing_map.
-        """
-        # ### IMPROVEMENT: The order of this loop now matters for tie-breaking ###
-        # We check for the most specific, action-oriented agents first.
+
+        try:
+            response = self.anthropic_client.messages.create(
+                model="claude-3-5-sonnet-20240620", max_tokens=1024,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            response_text = response.content[0].text
+            plan_json = json.loads(response_text)
+            print(f"Orchestrator: LLM Planner generated plan: {plan_json}")
+            return plan_json.get("plan")
+        except (json.JSONDecodeError, KeyError, Exception) as e:
+            print(f"Orchestrator: LLM planning failed. {e}")
+            return None
+
+    def _classify_query_simple(self, query_words: Set[str]) -> Optional[str]:
+        """Simple keyword-based routing for non-complex queries."""
         for agent_name, keyword_sets in self.routing_map.items():
             for keyword_set in keyword_sets:
                 if keyword_set.issubset(query_words):
-                    # Return the first agent that has a match.
                     return agent_name
-        return None # No specific agent found
+        return None
 
     def route_query(self, user_query: str, db_session, current_user) -> Dict[str, Any]:
         """
-        The main entry point. It now uses the improved classification.
+        ### FINAL VERSION: With robust, flexible plan execution logic.
         """
         clean_query = re.sub(r'[^\w\s]', '', user_query.lower())
         query_words = set(clean_query.split())
         
-        selected_agent_name = self._classify_query(query_words)
+        connector_words = {"and", "then", "after", "first", "next"}
+        is_complex = len(query_words.intersection(connector_words)) > 0
 
-        if not selected_agent_name:
-            print("Orchestrator could not determine a route.")
-            return {"success": False, "error": "I'm not sure which specialist can handle that request."}
+        plan = None
+        if is_complex:
+            plan = self._create_execution_plan(user_query)
 
-        # 2. Fetch the user's primary portfolio from the database
-        user_portfolios = crud.get_user_portfolios(db=db_session, user_id=current_user.id)
-        if not user_portfolios:
-            # Handle agents that don't need a portfolio (like the architect)
-            if selected_agent_name in ["StrategyArchitect"]:
-                 agent_to_run = self.roster[selected_agent_name]
-                 print(f"Orchestrator routing query to: {agent_to_run.name} (no portfolio context needed)")
-                 return agent_to_run.run(user_query, context={}) # Pass empty context
-            return {"success": False, "error": "You don't have a portfolio yet. Please create one first."}
+        if plan:
+            # --- Execute a Multi-Step Plan ---
+            step_results = []
+            user_portfolios = crud.get_user_portfolios(db=db_session, user_id=current_user.id)
+            current_context = get_market_data_for_portfolio(user_portfolios[0].holdings) if user_portfolios else {}
+            
+            for i, step in enumerate(plan):
+                agent_name_from_plan = step.get("agent")
+                step_query = step.get("query")
+                
+                # ### THE FIX: Implement a flexible agent lookup ###
+                agent_to_run = None
+                if agent_name_from_plan:
+                    # Normalize the name from the plan for matching (e.g., "QuantitativeAnalyst" -> "quantitativeanalyst")
+                    normalized_plan_agent_name = agent_name_from_plan.lower().replace("agent", "")
+                    
+                    for roster_key, agent_instance in self.roster.items():
+                        # Normalize the key from our roster (e.g., "QuantitativeAnalystAgent" -> "quantitativeanalyst")
+                        normalized_roster_key = roster_key.lower().replace("agent", "")
+                        if normalized_plan_agent_name == normalized_roster_key:
+                            agent_to_run = agent_instance
+                            break # Found the match, stop searching
+                
+                if not agent_to_run or not step_query:
+                    step_results.append({"error": f"Invalid plan at step {i+1}. Could not find agent '{agent_name_from_plan}' or query is missing."})
+                    continue
 
-        primary_portfolio = user_portfolios[0] # For now, we just use the user's first portfolio
+                print(f"Executing Plan Step {i+1}: Agent -> {agent_to_run.name}, Query -> {step_query}")
+                
+                result = agent_to_run.run(step_query, context=current_context)
+                step_results.append({agent_to_run.name: result})
+                
+                if isinstance(result, dict) and result.get("success"):
+                    current_context.update(result)
 
-        # 3. Use the data handler to get full market context
-        print(f"Fetching market data for portfolio ID: {primary_portfolio.id}")
-        portfolio_context = get_market_data_for_portfolio(primary_portfolio.holdings)
-        
-        # Add user and portfolio objects to context for agents that might need them
-        portfolio_context['user'] = current_user
-        portfolio_context['portfolio_model'] = primary_portfolio
-        
-        # 4. Route to the selected agent with the rich context
-        agent_to_run = self.roster[selected_agent_name]
-        print(f"Orchestrator routing query to: {agent_to_run.name}")
-        return agent_to_run.run(user_query, context=portfolio_context)
-    
-if __name__ == '__main__':
-    orchestrator = FinancialOrchestrator()
-    
-    test_query_1 = "rebalance my portfolio to diversify risk"
-    test_query_2 = "What investment strategy do you recommend?"
-    
-    print("\n--- TESTING ROUTING ---")
-    
-    # This should now select StrategyRebalancing
-    clean_q1 = re.sub(r'[^\w\s]', '', test_query_1.lower())
-    words_q1 = set(clean_q1.split())
-    agent_for_q1 = orchestrator._classify_query(words_q1)
-    print(f"Query: '{test_query_1}' -> Routed to: {agent_for_q1}")
+            # Synthesize final response from all steps
+            final_summary = "I have completed the multi-step analysis as requested.\n\n"
+            for i, res in enumerate(step_results):
+                agent_name = list(res.keys())[0] if res else "UnknownStep"
+                step_result = res.get(agent_name, {})
+                
+                summary = "Step completed."
+                if isinstance(step_result, dict):
+                    if "error" in step_result:
+                        summary = f"Step failed with error: {step_result['error']}"
+                    else:
+                        summary = step_result.get('summary', 'Step completed successfully.')
+                elif isinstance(step_result, str):
+                    summary = step_result
+                
+                final_summary += f"**Step {i+1} ({agent_name}):**\n{summary}\n\n"
 
-    # This should now select StrategyArchitect
-    clean_q2 = re.sub(r'[^\w\s]', '', test_query_2.lower())
-    words_q2 = set(clean_q2.split())
-    agent_for_q2 = orchestrator._classify_query(words_q2)
-    print(f"Query: '{test_query_2}' -> Routed to: {agent_for_q2}")
+            return {
+                "success": True,
+                "summary": final_summary,
+                "agent_used": "Orchestrator (Sequential Workflow)",
+                "steps": step_results
+            }
+        else:
+            # --- ### THIS IS THE FULL SINGLE-AGENT QUERY LOGIC ### ---
+            selected_agent_name = self._classify_query_simple(query_words)
+            if not selected_agent_name:
+                print("Orchestrator could not determine a route for a simple query.")
+                return {"success": False, "error": "I'm not sure which specialist can handle that request."}
+            
+            agent_to_run = self.roster[selected_agent_name]
+            
+            agents_that_dont_need_portfolio = ["StrategyArchitectAgent", "FinancialTutorAgent"]
+            
+            if selected_agent_name in agents_that_dont_need_portfolio:
+                print(f"Orchestrator routing query to: {agent_to_run.name} (no portfolio context needed)")
+                return agent_to_run.run(user_query, context={})
+            else:
+                user_portfolios = crud.get_user_portfolios(db=db_session, user_id=current_user.id)
+                if not user_portfolios:
+                    return {"success": False, "error": f"The '{agent_to_run.name}' requires a portfolio, but you don't have one yet."}
+
+                primary_portfolio = user_portfolios[0]
+                print(f"Fetching market data for portfolio ID: {primary_portfolio.id}")
+                portfolio_context = get_market_data_for_portfolio(primary_portfolio.holdings)
+                
+                print(f"Orchestrator routing query to: {agent_to_run.name}")
+                return agent_to_run.run(user_query, context=portfolio_context)
