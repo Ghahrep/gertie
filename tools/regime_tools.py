@@ -23,6 +23,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import yfinance as yf
 from typing import Dict, Any, Optional
+from langchain.tools import tool
 import warnings
 
 try:
@@ -41,7 +42,7 @@ except ImportError:
 warnings.filterwarnings('ignore', category=FutureWarning)
 warnings.filterwarnings('ignore', category=UserWarning, module='hmmlearn')
 
-
+@tool("DetectHMMRegimes")
 def detect_hmm_regimes(
     returns: pd.Series, 
     n_regimes: int = 2, 
@@ -159,7 +160,7 @@ def analyze_hurst_regimes(
         "results_df": df,
         "summary": summary
     }
-
+@tool("ForecastRegimeTransitionProbability")
 def forecast_regime_transition_probability(
     hmm_results: Dict[str, Any] ### IMPROVEMENT: Take the entire HMM result dictionary as input.
 ) -> Optional[Dict[str, Any]]:

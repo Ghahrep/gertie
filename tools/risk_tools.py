@@ -23,6 +23,7 @@ import numpy as np
 from arch import arch_model
 from scipy import stats
 from typing import List, Dict, Any, Optional
+from datetime import datetime
 from langchain.tools import tool
 from pydantic.v1 import BaseModel, Field
 
@@ -180,30 +181,38 @@ def calculate_beta(
 
 ### --- NEW ESSENTIAL FUNCTIONS --- ###
 
+
 def calculate_drawdowns(returns: pd.Series) -> Optional[Dict[str, Any]]:
     """
     A new, dedicated function to analyze historical portfolio drawdowns.
+    Handles both timeseries and simulated (integer-indexed) data.
     """
     if returns.empty: return None
 
     cumulative_returns = (1 + returns).cumprod()
-    # A running maximum of the cumulative returns up to each point
     running_max = cumulative_returns.cummax()
-    # The drawdown is the percentage drop from the running max
     drawdowns = (cumulative_returns - running_max) / running_max
 
     max_drawdown = drawdowns.min()
-    end_date = drawdowns.idxmin()
-    # Find the start date by looking for the last peak before the max drawdown end
-    start_date = cumulative_returns.loc[:end_date].idxmax()
+    end_date_idx = drawdowns.idxmin()
+    start_date_idx = cumulative_returns.loc[:end_date_idx].idxmax()
     
+    # ### THE FIX: Check the type of the index before formatting ###
+    if isinstance(start_date_idx, (datetime, pd.Timestamp)):
+        start_date_str = start_date_idx.strftime('%Y-%m-%d')
+        end_date_str = end_date_idx.strftime('%Y-%m-%d')
+    else:
+        # It's likely an integer index from a simulation
+        start_date_str = f"Day {start_date_idx}"
+        end_date_str = f"Day {end_date_idx}"
+
     annual_return = returns.mean() * 252
     calmar_ratio = annual_return / abs(max_drawdown) if max_drawdown < 0 else 0
     
     return {
         "max_drawdown_pct": max_drawdown * 100,
-        "start_of_max_drawdown": start_date.strftime('%Y-%m-%d'),
-        "end_of_max_drawdown": end_date.strftime('%Y-%m-%d'),
+        "start_of_max_drawdown": start_date_str,
+        "end_of_max_drawdown": end_date_str,
         "current_drawdown_pct": drawdowns.iloc[-1] * 100,
         "calmar_ratio": calmar_ratio
     }
@@ -302,5 +311,55 @@ def calculate_volatility_budget(
     except Exception as e:
         print(f"Error calculating volatility budget: {e}")
         return None
-# The functions calculate_dynamic_correlation_matrix, calculate_tail_risk_copula,
-# and calculate_volatility_budget from the previous step also belong in this file.
+
+@tool("CalculateTailRiskCopula")
+def calculate_tail_risk_copula(
+    returns: pd.DataFrame, 
+    n_simulations: int = 10000
+) -> Optional[pd.DataFrame]:
+    """
+    Performs a stress test by simulating returns using a Student's t-copula.
+    This method is excellent for capturing "fat tails" and joint extreme events.
+    Input should be a pandas DataFrame of daily returns for multiple assets.
+    """
+    if not isinstance(returns, pd.DataFrame) or returns.shape[0] < 100:
+        print("Error: Requires at least 100 data points for reliable copula fitting.")
+        return None
+
+    try:
+        # 1. Fit marginal distributions (Student's t) to each asset's returns
+        fitted_marginals = {
+            asset: stats.t.fit(returns[asset].dropna())
+            for asset in returns.columns
+        }
+
+        # 2. Transform historical returns to uniform distributions (pseudo-observations)
+        uniform_returns = pd.DataFrame({
+            asset: stats.t.cdf(returns[asset].dropna(), *params)
+            for asset, params in fitted_marginals.items()
+        })
+
+        # 3. Fit the t-copula
+        spearman_corr = uniform_returns.corr(method='spearman')
+        copula_df = 5  # Lower DF for fatter tails
+
+        # 4. Simulate from the copula
+        n_assets = len(returns.columns)
+        mvt_rvs = stats.multivariate_t.rvs(
+            loc=np.zeros(n_assets), 
+            shape=spearman_corr.values, 
+            df=copula_df, 
+            size=n_simulations
+        )
+        copula_sims_uniform = stats.t.cdf(mvt_rvs, df=copula_df)
+        
+        # 5. Transform uniform copula samples back to asset returns
+        simulated_returns = pd.DataFrame({
+            asset: stats.t.ppf(copula_sims_uniform[:, i], *fitted_marginals[asset])
+            for i, asset in enumerate(returns.columns)
+        })
+
+        return simulated_returns
+    except Exception as e:
+        print(f"Error during copula stress testing: {e}")
+        return None

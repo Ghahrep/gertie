@@ -33,6 +33,7 @@ class HoldingCreate(HoldingBase):
 class Holding(HoldingBase):
     id: int
     asset_id: int
+    purchase_price: Optional[float] = None
 
     class Config:
         from_attributes = True

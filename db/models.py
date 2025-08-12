@@ -63,15 +63,14 @@ class Holding(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     shares = Column(Float, nullable=False)
+    purchase_price = Column(Float, nullable=True)  # This line
     
     portfolio_id = Column(Integer, ForeignKey("portfolios.id"))
     asset_id = Column(Integer, ForeignKey("assets.id"))
 
     portfolio = relationship("Portfolio", back_populates="holdings")
-    asset = relationship("Asset") # This relationship is used by the property below
+    asset = relationship("Asset")
 
-    # ### THE FIX: Add this hybrid property ###
-    # This teaches our Holding database object how to find its own ticker.
     @hybrid_property
     def ticker(self):
         return self.asset.ticker

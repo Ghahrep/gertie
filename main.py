@@ -1,5 +1,6 @@
 # in main.py
 from fastapi import FastAPI, Depends
+from fastapi.middleware.cors import CORSMiddleware  # Add this import
 from pydantic import BaseModel
 from typing import Dict, Any, Optional
 from sqlalchemy.orm import Session # <-- THIS IS THE MISSING IMPORT
@@ -15,6 +16,19 @@ app = FastAPI(
     title="Gertie.ai - Multi-Agent Financial Platform",
     description="An API for interacting with a team of specialized financial AI agents.",
     version="1.0.0"
+)
+
+# Add CORS middleware - ADD THIS SECTION
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:3001",  # In case you need alternative port
+    ],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    allow_headers=["*"],
 )
 
 # Include the routers in your main app
