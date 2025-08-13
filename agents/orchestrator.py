@@ -41,11 +41,20 @@ class FinancialOrchestrator:
         }
         print(f"FinancialOrchestrator initialized with a team of {len(self.roster)} agents.")
         self._setup_classification_patterns()
-        self.anthropic_client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+        llm_config = {
+            "config_list": [{
+                "model": "claude-3-5-sonnet-20240620",
+                "api_key": settings.ANTHROPIC_API_KEY,
+                "api_type": "anthropic",
+            }],
+            "temperature": 0.2,
+        }
+        self.conversation_manager = AutoGenConversationManager(llm_config=llm_config)
 
     def _setup_classification_patterns(self):
         """Setup prioritized keyword sets for routing."""
         self.routing_map = {
+            
             "StrategyRebalancingAgent": {frozenset(["rebalance"]), frozenset(["optimize"]), frozenset(["allocation"]), frozenset(["risk", "parity"]), frozenset(["diversify", "risk"])},
             "StrategyBacktesterAgent": {frozenset(["backtest"]), frozenset(["test", "strategy"])},
             "HedgingStrategistAgent": {frozenset(["hedge"]), frozenset(["protect"]), frozenset(["target", "volatility"])},
@@ -95,12 +104,84 @@ class FinancialOrchestrator:
             return None
 
     def _classify_query_simple(self, query_words: Set[str]) -> Optional[str]:
-        """Simple keyword-based routing for non-complex queries."""
-        for agent_name, keyword_sets in self.routing_map.items():
-            for keyword_set in keyword_sets:
-                if keyword_set.issubset(query_words):
-                    return agent_name
-        return None
+        """Enhanced keyword-based routing with stemming and partial matches."""
+        
+        # Create expanded keyword mappings with variations
+        expanded_routing = {
+            "QuantitativeAnalystAgent": {
+                "analyze", "analysis", "analyzing", "analytical",
+                "risk", "risks", "risky", 
+                "report", "reports", "reporting",
+                "factor", "factors",
+                "alpha", "beta",
+                "cvar", "var",
+                "stress", "test", "testing",
+                "tail", "performance", "metrics"
+            },
+            "StrategyRebalancingAgent": {
+                "rebalance", "rebalancing", "rebalanced",
+                "optimize", "optimization", "optimizing",
+                "allocation", "allocate", "allocating",
+                "diversify", "diversification", "diversifying"
+            },
+            "FinancialTutorAgent": {
+                "explain", "explaining", "explained",
+                "what", "is", "define", "definition",
+                "learn", "learning", "teach", "tutorial",
+                "help", "how"
+            },
+            "StrategyArchitectAgent": {
+                "design", "designing", "create", "build",
+                "strategy", "strategies", "strategic",
+                "recommend", "recommendation", "suggest",
+                "momentum", "trend", "find"
+            },
+            "StrategyRebalancingAgent": {
+                "rebalance", "optimize", "allocation"
+            },
+            "HedgingStrategistAgent": {
+                "hedge", "hedging", "protect", "protection",
+                "volatility", "target"
+            },
+            "RegimeForecastingAgent": {
+                "forecast", "forecasting", "predict",
+                "regime", "transition", "change"
+            },
+            "BehavioralFinanceAgent": {
+                "bias", "biases", "behavior", "psychology",
+                "behavioral", "psychological"
+            },
+            "ScenarioSimulationAgent": {
+                "scenario", "scenarios", "simulate",
+                "simulation", "what-if", "crash"
+            },
+            "StrategyBacktesterAgent": {
+                "backtest", "backtesting", "test", "testing"
+            }
+        }
+        
+        # Score each agent based on keyword matches
+        agent_scores = {}
+        for agent_name, keywords in expanded_routing.items():
+            score = len(query_words.intersection(keywords))
+            if score > 0:
+                agent_scores[agent_name] = score
+        
+        # Return the agent with the highest score
+        if agent_scores:
+            best_agent = max(agent_scores.items(), key=lambda x: x[1])
+            print(f"Routing to {best_agent[0]} (score: {best_agent[1]})")
+            return best_agent[0]
+        
+        # Default fallback for portfolio-related queries
+        portfolio_words = {"portfolio", "portfolios", "holdings", "stocks", "investments"}
+        if query_words.intersection(portfolio_words):
+            print("Defaulting to QuantitativeAnalystAgent for portfolio query")
+            return "QuantitativeAnalystAgent"
+        
+        # Final fallback
+        print("No specific routing found, defaulting to FinancialTutorAgent")
+        return "FinancialTutorAgent"
 
     def route_query(self, user_query: str, db_session, current_user) -> Dict[str, Any]:
         """
