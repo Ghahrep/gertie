@@ -1,10 +1,23 @@
-from db.session import Base
 from logging.config import fileConfig
 
 from sqlalchemy import engine_from_config
 from sqlalchemy import pool
 
 from alembic import context
+
+# --- THIS IS THE CRITICAL FIX ---
+# Ensure the application's models are loaded for autogenerate to work correctly.
+import os
+import sys
+
+# Add the project root to the Python path
+# This goes from db/migrations -> db -> project_root
+sys.path.insert(0, os.path.realpath(os.path.join(os.path.dirname(__file__), '..', '..')))
+
+from db.session import Base
+from db import models  # This explicitly imports and registers your models
+# --- END FIX ---
+
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

@@ -1,4 +1,5 @@
-# in agents/quantitative_analyst.py
+# agents/quantitative_analyst.py
+
 from typing import Dict, Any, Optional
 import pandas as pd
 
@@ -9,7 +10,7 @@ from tools.nlp_tools import summarize_analysis_results
 
 class QuantitativeAnalystAgent(BaseFinancialAgent):
     """
-    ### FINAL VERSION: A multi-talented analyst using modern .invoke() calls.
+    A multi-talented analyst that performs and summarizes detailed statistical analysis.
     """
     @property
     def name(self) -> str: return "QuantitativeAnalyst"
@@ -32,53 +33,56 @@ class QuantitativeAnalystAgent(BaseFinancialAgent):
         if not context or "portfolio_returns" not in context:
             return {"success": False, "error": "Could not perform analysis. Portfolio data is missing."}
 
-        query = user_query.lower()
-        
-        # Handle specific requests for stress testing
-        if "stress test" in query or "tail risk" in query or "copula" in query:
-            if "returns" not in context or context["returns"].shape[1] < 2:
-                 return {"success": False, "error": "Stress testing requires a portfolio with at least two assets."}
+        # --- THIS IS THE CORE FIX ---
+        # We will now handle all logic within a try/except block to ensure
+        # a properly formatted response is always returned to the API route.
 
-            print("Executing tool 'CalculateTailRiskCopula'...")
-            # ### REFINEMENT: Use .invoke() instead of .run() ###
-            simulations = self.tool_map["CalculateTailRiskCopula"].invoke({"returns": context["returns"]})
+        try:
+            query = user_query.lower()
             
-            if simulations is None or simulations.empty:
-                return {"success": False, "error": "Tail-risk stress test failed to generate scenarios."}
+            # This logic remains the same
+            if "stress test" in query or "tail risk" in query or "copula" in query:
+                # ... (stress test logic is unchanged)
+                 if "returns" not in context or context["returns"].shape[1] < 2:
+                    return {"success": False, "error": "Stress testing requires a portfolio with at least two assets."}
 
-            weights = context.get("weights", pd.Series(dtype=float))
-            stressed_returns = (simulations * weights).sum(axis=1)
-            stressed_metrics = self.tool_map["CalculateRiskMetrics"].invoke({"portfolio_returns": stressed_returns})
+                 print("Executing tool 'CalculateTailRiskCopula'...")
+                 simulations = self.tool_map["CalculateTailRiskCopula"].invoke({"returns": context["returns"]})
+                 
+                 if simulations is None or simulations.empty:
+                     return {"success": False, "error": "Tail-risk stress test failed to generate scenarios."}
 
-            if not stressed_metrics:
-                return {"success": False, "error": "Could not calculate risk metrics on the stress test results."}
-            
-            print("Executing tool 'SummarizeAnalysisResults' on stressed data...")
-            summary_text = self.tool_map["SummarizeAnalysisResults"].invoke({
-                "analysis_type": "Portfolio Tail-Risk Stress Test Report",
-                "data": stressed_metrics 
-            })
+                 weights = context.get("weights", pd.Series(dtype=float))
+                 stressed_returns = (simulations * weights).sum(axis=1)
+                 analysis_result = self.tool_map["CalculateRiskMetrics"].invoke({"portfolio_returns": stressed_returns})
+                 analysis_type = "Portfolio Tail-Risk Stress Test Report"
 
-            stressed_metrics['summary'] = summary_text
-            stressed_metrics['agent_used'] = self.name
-            return stressed_metrics
-            
-        # Handle requests for a general risk report
-        elif "risk" in query or "report" in query or "analyze" in query or "metrics" in query:
-            print("Executing tool 'CalculateRiskMetrics'...")
-            risk_result = self.tool_map["CalculateRiskMetrics"].invoke({"portfolio_returns": context["portfolio_returns"]})
-            if not risk_result:
-                return {"success": False, "error": "The 'CalculateRiskMetrics' tool failed."}
+            else: # Default to a general risk report
+                print("Executing tool 'CalculateRiskMetrics'...")
+                analysis_result = self.tool_map["CalculateRiskMetrics"].invoke({"portfolio_returns": context["portfolio_returns"]})
+                analysis_type = "Portfolio Risk Report"
+
+            if not analysis_result:
+                return {"success": False, "error": "The financial metrics calculation failed."}
 
             print("Executing tool 'SummarizeAnalysisResults'...")
             summary_text = self.tool_map["SummarizeAnalysisResults"].invoke({
-                "analysis_type": "Portfolio Risk Report",
-                "data": risk_result 
+                "analysis_type": analysis_type,
+                "data": analysis_result 
             })
-            
-            risk_result['summary'] = summary_text
-            risk_result['agent_used'] = self.name
-            return risk_result
-            
-        else:
-            return {"success": False, "error": "I'm a quantitative analyst. Please ask for a specific analysis like a 'risk report' or 'stress test'."}
+
+            # --- CRITICAL CHANGE HERE ---
+            # We now construct a final, successful dictionary that the API expects.
+            return {
+                "success": True,
+                "summary": summary_text,
+                "data": analysis_result, # Include the raw data for the frontend
+                "agent_used": self.name
+            }
+
+        except Exception as e:
+            # If anything goes wrong in the process, we catch it and return a formatted error.
+            print(f"An unexpected error occurred in the QuantitativeAnalystAgent: {e}")
+            import traceback
+            traceback.print_exc()
+            return {"success": False, "error": f"An internal error occurred in the analyst agent: {str(e)}"}

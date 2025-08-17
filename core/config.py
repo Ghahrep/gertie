@@ -24,3 +24,5 @@ class Settings(BaseSettings):
 
 # Create a single, importable instance of the settings
 settings = Settings()
+
+print("--- LOADED SETTINGS ---", settings.model_dump()) 
