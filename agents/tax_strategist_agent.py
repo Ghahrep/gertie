@@ -164,6 +164,7 @@ class TaxStrategistAgent(MCPBaseAgent):
             "year_end_tax_planning": self.generate_year_end_strategy,
             "after_tax_analysis": self.analyze_after_tax_returns,
             "tax_optimization": self.comprehensive_tax_optimization,
+            "comprehensive_tax_optimization": self.comprehensive_tax_optimization,
             "wash_sale_compliance": self.check_wash_sale_compliance,
             "retirement_planning": self.optimize_retirement_contributions,
             "debate_participation": self.participate_in_debate

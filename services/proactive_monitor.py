@@ -1,4 +1,4 @@
-# services/proactive_monitor.py
+# services/proactive_monitor.py - CLEAN VERSION (fixes circular import)
 import asyncio
 import logging
 from typing import Dict, List, Optional
@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from dataclasses import dataclass
 from enum import Enum
 
+# MCP imports (your existing)
 from mcp.schemas import JobRequest
 from services.mcp_client import get_mcp_client
 
@@ -39,7 +40,7 @@ class MonitoringAlert:
     user_id: Optional[str] = None
 
 class ProactiveRiskMonitor:
-    """Proactive portfolio monitoring service"""
+    """Enhanced Proactive portfolio monitoring service with real risk detection"""
     
     def __init__(self):
         self.active_monitors: Dict[str, asyncio.Task] = {}
@@ -66,6 +67,20 @@ class ProactiveRiskMonitor:
         # Rate limiting to prevent spam
         self.last_alert_times: Dict[str, datetime] = {}
         self.alert_cooldown = timedelta(minutes=30)  # 30 min cooldown per alert type
+        
+        # 🆕 Risk detection service - LAZY IMPORT to avoid circular dependency
+        self._risk_detector = None
+        
+    def _get_risk_detector(self):
+        """Lazy initialization of risk detector to avoid circular imports"""
+        if self._risk_detector is None:
+            try:
+                from services.risk_detector import create_risk_detector
+                self._risk_detector = create_risk_detector(threshold_pct=15.0)
+            except Exception as e:
+                logger.warning(f"Could not initialize risk detector: {e}")
+                self._risk_detector = False  # Mark as failed
+        return self._risk_detector if self._risk_detector is not False else None
         
     async def start_portfolio_monitoring(self, portfolio_id: str, user_id: str):
         """Start continuous monitoring for a portfolio"""
@@ -111,7 +126,7 @@ class ProactiveRiskMonitor:
                 # Stagger different types of monitoring
                 tasks = []
                 
-                # Risk monitoring (every cycle)
+                # Risk monitoring (every cycle) - 🔄 ENHANCED
                 tasks.append(self._check_risk_thresholds(portfolio_id, user_id))
                 
                 # Market regime monitoring (every 3rd cycle = ~15 min)
@@ -138,34 +153,187 @@ class ProactiveRiskMonitor:
             # Continue monitoring after error
             await asyncio.sleep(60)
 
-    
+    # 🔄 ENHANCED: Replace your existing _check_risk_thresholds method
     async def _check_risk_thresholds(self, portfolio_id: str, user_id: str):
-        """Check if portfolio risk metrics breach thresholds"""
+        """Enhanced risk threshold checking with real calculations and MCP integration"""
         try:
-            # Submit risk analysis job to MCP
+            # 🆕 NEW: Real risk detection alongside MCP (if available)
+            risk_detector = self._get_risk_detector()
+            if risk_detector:
+                await self._perform_real_risk_detection(portfolio_id, user_id, risk_detector)
+            
+            # 🔄 ENHANCED: Still submit to MCP but with enriched context
             job_request = JobRequest(
-                query="Check portfolio risk thresholds for monitoring alerts",
+                query="Check portfolio risk thresholds for monitoring alerts with comprehensive analysis",
                 context={
                     "portfolio_id": portfolio_id,
                     "user_id": user_id,
                     "monitoring_mode": True,
                     "thresholds": self.alert_thresholds,
-                    "alert_check": True
+                    "alert_check": True,
+                    "enhanced_risk_detection": risk_detector is not None,  # Flag for enhanced analysis
+                    "risk_metrics_available": risk_detector is not None
                 },
                 priority=5,
                 timeout_seconds=60,
-                required_capabilities=["risk_analysis"]
+                required_capabilities=["risk_analysis", "portfolio_monitoring"]
             )
             
             mcp_client = await get_mcp_client()
             job_response = await mcp_client.submit_job(job_request)
             
-            # For demo purposes, simulate risk threshold checks
-            # In production, would analyze actual job results
-            await self._simulate_risk_threshold_check(portfolio_id, user_id)
+            logger.debug(f"MCP risk analysis job submitted for portfolio {portfolio_id}")
             
         except Exception as e:
-            logger.error(f"Error checking risk thresholds for {portfolio_id}: {str(e)}")
+            logger.error(f"Error in enhanced risk threshold check for {portfolio_id}: {str(e)}")
+            # Fallback to basic monitoring if enhanced detection fails
+            await self._simulate_risk_threshold_check(portfolio_id, user_id)
+
+    # 🆕 NEW: Real risk detection method
+    async def _perform_real_risk_detection(self, portfolio_id: str, user_id: str, risk_detector):
+        """Perform real risk detection using the RiskDetectorService"""
+        db = None
+        try:
+            # LAZY IMPORT to avoid circular dependency
+            from db.session import get_db
+            db = next(get_db())
+            
+            # Use the risk detector to analyze portfolio risk changes
+            risk_analysis = await risk_detector.detect_portfolio_risk_changes(
+                portfolio_id=int(portfolio_id),
+                user_id=int(user_id),
+                db=db
+            )
+            
+            if risk_analysis and risk_analysis.threshold_breached:
+                logger.warning(f"Risk threshold breached for portfolio {portfolio_id}: {risk_analysis.risk_direction} by {risk_analysis.risk_magnitude_pct:.1f}%")
+                
+                # Convert risk analysis to alerts compatible with existing system
+                alerts = await risk_detector.integrate_with_proactive_monitor(
+                    risk_analysis, self
+                )
+                
+                # Generate and send alerts using existing alert system
+                for alert_data in alerts:
+                    alert = await self._create_alert(
+                        portfolio_id=alert_data['portfolio_id'],
+                        user_id=user_id,
+                        alert_type=alert_data['alert_type'],
+                        priority=alert_data['priority'],
+                        message=alert_data['message'],
+                        details=alert_data['details']
+                    )
+                    await self._send_alert(alert)
+                
+                # 🚀 Trigger workflow if significant risk increase
+                if risk_analysis.should_trigger_workflow:
+                    await self._trigger_risk_workflow(portfolio_id, user_id, risk_analysis)
+                    
+            elif risk_analysis:
+                logger.debug(f"Portfolio {portfolio_id} risk levels normal - no threshold breach")
+            else:
+                logger.warning(f"Could not analyze risk for portfolio {portfolio_id}")
+                
+        except Exception as e:
+            logger.error(f"Error in real risk detection for portfolio {portfolio_id}: {e}")
+        finally:
+            if db:
+                db.close()
+
+    # 🆕 NEW: Risk workflow trigger method
+    async def _trigger_risk_workflow(self, portfolio_id: str, user_id: str, risk_analysis):
+        """Trigger AI workflow when significant risk increase detected"""
+        try:
+            # Generate system prompt based on risk analysis
+            workflow_prompt = self._generate_risk_workflow_prompt(portfolio_id, risk_analysis)
+            
+            # Submit workflow job to MCP
+            workflow_job = JobRequest(
+                query=workflow_prompt,
+                context={
+                    "portfolio_id": portfolio_id,
+                    "user_id": user_id,
+                    "trigger_type": "PROACTIVE_RISK_ALERT",
+                    "risk_analysis": {
+                        "risk_direction": risk_analysis.risk_direction,
+                        "risk_magnitude_pct": risk_analysis.risk_magnitude_pct,
+                        "significant_changes": risk_analysis.significant_changes,
+                        "recommendation": risk_analysis.recommendation
+                    },
+                    "workflow_mode": True,
+                    "priority": "high"
+                },
+                priority=3,  # High priority for risk-triggered workflows
+                timeout_seconds=300,  # 5 minutes for comprehensive analysis
+                required_capabilities=["multi_agent_workflow", "risk_analysis", "portfolio_strategy"]
+            )
+            
+            mcp_client = await get_mcp_client()
+            workflow_response = await mcp_client.submit_job(workflow_job)
+            
+            logger.info(f"Risk-triggered workflow initiated for portfolio {portfolio_id}")
+            
+            # Create alert about workflow initiation
+            workflow_alert = await self._create_alert(
+                portfolio_id=portfolio_id,
+                user_id=user_id,
+                alert_type=AlertType.REGIME_CHANGE,  # Using closest existing type
+                priority=AlertPriority.HIGH,
+                message=f"AI Team Analysis Initiated: Portfolio risk increased by {risk_analysis.risk_magnitude_pct:.1f}%",
+                details={
+                    "workflow_triggered": True,
+                    "risk_analysis_summary": risk_analysis.recommendation,
+                    "analysis_type": "multi_agent_collaborative"
+                }
+            )
+            await self._send_alert(workflow_alert)
+            
+        except Exception as e:
+            logger.error(f"Error triggering risk workflow for portfolio {portfolio_id}: {e}")
+
+    # 🆕 NEW: Generate workflow prompt based on risk analysis
+    def _generate_risk_workflow_prompt(self, portfolio_id: str, risk_analysis) -> str:
+        """Generate contextual prompt for risk-triggered workflow"""
+        
+        # Format significant changes for readability
+        changes_text = []
+        for metric, change in risk_analysis.significant_changes.items():
+            changes_text.append(f"  • {metric.replace('_', ' ').title()}: {change:+.1f}%")
+        changes_summary = "\n".join(changes_text) if changes_text else "  • Overall risk profile changes detected"
+        
+        prompt = f"""
+System Alert: Significant Portfolio Risk Increase Detected
+
+Portfolio ID: {portfolio_id}
+Risk Assessment:
+  • Direction: {risk_analysis.risk_direction}
+  • Magnitude: {risk_analysis.risk_magnitude_pct:.1f}%
+  • Current Risk Score: {risk_analysis.current_metrics.risk_score}/100
+
+Key Risk Changes:
+{changes_summary}
+
+Risk Analysis Summary:
+{risk_analysis.recommendation}
+
+Team, please conduct a comprehensive 4-step analysis:
+
+1. STRATEGY ANALYSIS: Analyze the root causes of this risk increase
+2. SECURITY SCREENING: Review current holdings for risk contributors  
+3. RISK ASSESSMENT: Quantify the impact and provide stress test scenarios
+4. RECOMMENDATIONS: Provide specific, actionable steps to mitigate the increased risk
+
+Please focus on:
+- Immediate actions to reduce risk exposure
+- Portfolio rebalancing recommendations
+- Hedging strategies if appropriate
+- Timeline for implementing changes
+- Monitoring adjustments needed
+
+This is a proactive risk alert requiring urgent attention.
+        """
+        
+        return prompt.strip()
     
     async def _check_market_regime_changes(self, portfolio_id: str, user_id: str):
         """Monitor for significant market regime changes"""
@@ -242,8 +410,11 @@ class ProactiveRiskMonitor:
     
     # Simulation methods for demonstration (replace with real analysis in production)
     async def _simulate_risk_threshold_check(self, portfolio_id: str, user_id: str):
-        """Simulate risk threshold checking"""
+        """Simulate risk threshold checking - FALLBACK ONLY"""
         import random
+        
+        # Only used as fallback when real risk detection fails
+        logger.info(f"Using fallback simulated risk check for portfolio {portfolio_id}")
         
         # Randomly trigger alerts for demonstration
         if random.random() < 0.05:  # 5% chance per check
@@ -252,8 +423,8 @@ class ProactiveRiskMonitor:
             if self._should_send_alert(f"{portfolio_id}_{alert_type.value}"):
                 alert = await self._create_alert(
                     portfolio_id, user_id, alert_type, AlertPriority.HIGH,
-                    f"Risk threshold breached: {alert_type.value}",
-                    {"simulated": True, "threshold_value": 0.025}
+                    f"Risk threshold breached: {alert_type.value} (simulated fallback)",
+                    {"simulated": True, "fallback_mode": True, "threshold_value": 0.025}
                 )
                 await self._send_alert(alert)
     
@@ -340,105 +511,74 @@ class ProactiveRiskMonitor:
         if len(self.alert_history) > 1000:
             self.alert_history = self.alert_history[-1000:]
 
-    async def generate_proactive_alerts(self, portfolio_id: str, risk_changes: Dict) -> List[MonitoringAlert]:
-        """Generate alerts based on risk changes"""
-        alerts = []
-        user_id = risk_changes.get("user_id", "unknown")
-        
-        # VaR breach alert
-        if risk_changes.get("var_breach"):
-            alerts.append(await self._create_alert(
-                portfolio_id, user_id, AlertType.VAR_BREACH, AlertPriority.HIGH,
-                "Portfolio VaR threshold breached - risk exposure elevated",
-                {
-                    "current_var": risk_changes.get("current_var", 0),
-                    "threshold": self.alert_thresholds["var_breach"],
-                    "recommended_action": "Consider reducing position sizes"
-                }
-            ))
-        
-        # Correlation spike alert
-        if risk_changes.get("correlation_spike"):
-            alerts.append(await self._create_alert(
-                portfolio_id, user_id, AlertType.CORRELATION_SPIKE, AlertPriority.MEDIUM,
-                "Portfolio correlation spike detected - diversification reduced",
-                {
-                    "avg_correlation": risk_changes.get("avg_correlation", 0),
-                    "threshold": self.alert_thresholds["correlation_spike"],
-                    "affected_pairs": risk_changes.get("high_corr_pairs", [])
-                }
-            ))
-        
-        # Concentration risk alert
-        if risk_changes.get("concentration_risk"):
-            alerts.append(await self._create_alert(
-                portfolio_id, user_id, AlertType.CONCENTRATION_RISK, AlertPriority.HIGH,
-                "High concentration risk detected in portfolio",
-                {
-                    "largest_position_pct": risk_changes.get("largest_position_pct", 0),
-                    "threshold": self.alert_thresholds["concentration_risk"] * 100,
-                    "concentrated_holdings": risk_changes.get("concentrated_holdings", [])
-                }
-            ))
-        
-        # Volatility spike alert  
-        if risk_changes.get("volatility_spike"):
-            alerts.append(await self._create_alert(
-                portfolio_id, user_id, AlertType.VOLATILITY_SPIKE, AlertPriority.MEDIUM,
-                "Portfolio volatility spike detected",
-                {
-                    "current_volatility": risk_changes.get("current_volatility", 0),
-                    "normal_volatility": risk_changes.get("normal_volatility", 0),
-                    "spike_magnitude": risk_changes.get("volatility_multiplier", 1)
-                }
-            ))
-        
-        # Store alerts
-        for alert in alerts:
-            await self._store_alert(alert)
-        
-        return alerts
-    
-    async def _store_alert(self, alert: MonitoringAlert):
-        """Store alert in system"""
-        # Add to in-memory storage
-        self.alert_history.append(alert)
-        
-        # Log alert with structured data
-        logger.info(f"Alert stored: {alert.alert_type.value} for portfolio {alert.portfolio_id}", 
-                   extra={
-                       "alert_id": alert.alert_id,
-                       "portfolio_id": alert.portfolio_id,
-                       "alert_type": alert.alert_type.value,
-                       "priority": alert.priority.value,
-                       "timestamp": alert.timestamp.isoformat()
-                   })
-        
-        # In production, would save to database:
-        # await database.insert("monitoring_alerts", alert.__dict__)
-    
-    def get_active_monitors(self) -> List[str]:
-        """Get list of actively monitored portfolios"""
-        return list(self.active_monitors.keys())
-    
+    # 🔄 ENHANCED: Add risk context to existing monitoring stats
     def get_monitoring_stats(self) -> Dict:
-        """Get monitoring system statistics"""
+        """Enhanced monitoring system statistics with risk metrics"""
+        # Get your existing stats
         total_alerts = len(self.alert_history)
         recent_alerts = len([a for a in self.alert_history if 
-                           (datetime.utcnow() - a.timestamp).total_seconds() < 3600])  # Last hour
+                           (datetime.utcnow() - a.timestamp).total_seconds() < 3600])
         
         alert_by_priority = {}
         for priority in AlertPriority:
             alert_by_priority[priority.value] = len([a for a in self.alert_history if a.priority == priority])
+        
+        # 🆕 NEW: Add risk-specific statistics
+        risk_alerts = len([a for a in self.alert_history if 
+                          a.alert_type in [AlertType.VAR_BREACH, AlertType.VOLATILITY_SPIKE]])
+        
+        workflow_triggered_alerts = len([a for a in self.alert_history if 
+                                       a.details.get("workflow_triggered", False)])
+        
+        risk_detector = self._get_risk_detector()
         
         return {
             "active_monitors": len(self.active_monitors),
             "total_alerts": total_alerts,
             "recent_alerts_1h": recent_alerts,
             "alerts_by_priority": alert_by_priority,
+            "risk_specific_alerts": risk_alerts,
+            "workflow_triggered_count": workflow_triggered_alerts,
             "monitoring_intervals": self.monitoring_intervals,
-            "alert_thresholds": self.alert_thresholds
+            "alert_thresholds": self.alert_thresholds,
+            "enhanced_risk_detection": risk_detector is not None  # Flag indicating enhanced capabilities
         }
+    
+    # 🆕 NEW: Method to manually trigger risk analysis for testing
+    async def manual_risk_check(self, portfolio_id: str, user_id: str) -> Dict:
+        """Manually trigger risk analysis for testing/debugging"""
+        try:
+            logger.info(f"Manual risk check initiated for portfolio {portfolio_id}")
+            
+            risk_detector = self._get_risk_detector()
+            if risk_detector:
+                await self._perform_real_risk_detection(portfolio_id, user_id, risk_detector)
+                return {
+                    "status": "completed",
+                    "portfolio_id": portfolio_id,
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "message": "Manual risk analysis completed successfully"
+                }
+            else:
+                return {
+                    "status": "completed",
+                    "portfolio_id": portfolio_id,
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "message": "Manual risk check completed (risk detector not available)"
+                }
+        except Exception as e:
+            logger.error(f"Manual risk check failed for portfolio {portfolio_id}: {e}")
+            return {
+                "status": "error",
+                "portfolio_id": portfolio_id,
+                "error": str(e),
+                "timestamp": datetime.utcnow().isoformat()
+            }
+
+    # Add remaining methods from your original file...
+    def get_active_monitors(self) -> List[str]:
+        """Get list of actively monitored portfolios"""
+        return list(self.active_monitors.keys())
     
     def get_portfolio_alerts(self, portfolio_id: str, limit: int = 50) -> List[Dict]:
         """Get alerts for a specific portfolio"""
@@ -472,64 +612,6 @@ class ProactiveRiskMonitor:
                 logger.info(f"Alert {alert_id} marked as resolved")
                 return True
         return False
-    
-    async def update_thresholds(self, new_thresholds: Dict) -> Dict:
-        """Update monitoring thresholds"""
-        valid_thresholds = {}
-        
-        for key, value in new_thresholds.items():
-            if key in self.alert_thresholds and isinstance(value, (int, float)):
-                valid_thresholds[key] = value
-                self.alert_thresholds[key] = value
-        
-        logger.info(f"Updated monitoring thresholds: {valid_thresholds}")
-        return {
-            "updated_thresholds": valid_thresholds,
-            "current_thresholds": self.alert_thresholds
-        }
-    
-    async def get_alert_summary(self, portfolio_id: str, hours: int = 24) -> Dict:
-        """Get alert summary for portfolio over specified time period"""
-        cutoff_time = datetime.utcnow() - timedelta(hours=hours)
-        
-        recent_alerts = [
-            alert for alert in self.alert_history
-            if alert.portfolio_id == portfolio_id and alert.timestamp >= cutoff_time
-        ]
-        
-        if not recent_alerts:
-            return {
-                "portfolio_id": portfolio_id,
-                "time_period_hours": hours,
-                "total_alerts": 0,
-                "alert_summary": "No alerts in specified time period",
-                "risk_level": "normal"
-            }
-        
-        # Count by priority
-        priority_counts = {}
-        for priority in AlertPriority:
-            priority_counts[priority.value] = len([a for a in recent_alerts if a.priority == priority])
-        
-        # Determine risk level
-        if priority_counts.get("critical", 0) > 0:
-            risk_level = "critical"
-        elif priority_counts.get("high", 0) > 2:
-            risk_level = "high"
-        elif priority_counts.get("high", 0) > 0 or priority_counts.get("medium", 0) > 3:
-            risk_level = "elevated"
-        else:
-            risk_level = "normal"
-        
-        return {
-            "portfolio_id": portfolio_id,
-            "time_period_hours": hours,
-            "total_alerts": len(recent_alerts),
-            "alerts_by_priority": priority_counts,
-            "risk_level": risk_level,
-            "alert_summary": f"{len(recent_alerts)} alerts in last {hours} hours",
-            "most_recent_alert": recent_alerts[-1].timestamp.isoformat() if recent_alerts else None
-        }
 
 # Global monitor instance
 _proactive_monitor = ProactiveRiskMonitor()

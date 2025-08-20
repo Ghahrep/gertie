@@ -286,6 +286,34 @@ class BaseAgent(ABC):
         
         return list(set(mapped_focus))  # Remove duplicates
     
+    def _identify_primary_concerns(self, query: str, context: Dict) -> List[str]:
+        """Identify primary concerns for this agent type"""
+        # Default implementation - can be overridden by specific agents
+        return ["portfolio_optimization", "risk_management", "performance_analysis"]
+    
+    def _assess_query_complexity(self, query: str, context: Dict) -> str:
+        """Assess the complexity of the query"""
+        # Simple implementation based on query length and context
+        if len(query.split()) > 50 or len(context) > 10:
+            return "high"
+        elif len(query.split()) > 20 or len(context) > 5:
+            return "medium"
+        else:
+            return "low"
+    
+    def _identify_confidence_factors(self, query: str, context: Dict) -> List[str]:
+        """Identify factors that affect confidence in analysis"""
+        factors = []
+        
+        if "data" in query.lower() or "analysis" in query.lower():
+            factors.append("data_availability")
+        if "market" in query.lower():
+            factors.append("market_volatility")
+        if "future" in query.lower() or "predict" in query.lower():
+            factors.append("prediction_uncertainty")
+        
+        return factors
+    
     async def _gather_perspective_evidence(self, analysis: Dict, context: Dict) -> List[Dict]:
         """Gather evidence aligned with agent's perspective and style"""
         
@@ -372,6 +400,31 @@ class BaseAgent(ABC):
         }
         
         return perspective_analysis.get(self.perspective, evidence.get("analysis", ""))
+    
+    def _assess_evidence_confidence(self, evidence: Dict) -> float:
+        """Assess confidence in evidence based on agent's perspective"""
+        base_confidence = evidence.get("confidence", 0.5)
+        
+        # Adjust based on agent's evidence preferences
+        evidence_type = evidence.get("type", "").lower()
+        preference = self.debate_config["evidence_preference"]
+        
+        if preference in evidence_type:
+            return min(base_confidence + 0.1, 1.0)
+        else:
+            return max(base_confidence - 0.05, 0.1)
+    
+    def _calculate_evidence_relevance(self, evidence: Dict) -> float:
+        """Calculate relevance score for evidence"""
+        # Simple relevance calculation - can be enhanced
+        relevance = 0.5
+        
+        # Boost relevance if evidence aligns with agent strengths
+        for strength in self.debate_strengths:
+            if strength.replace("_", " ") in evidence.get("analysis", "").lower():
+                relevance += 0.1
+        
+        return min(relevance, 1.0)
     
     async def _formulate_position(self, analysis: Dict, evidence: List[Dict], context: Dict) -> Dict:
         """Formulate clear, defendable position based on analysis and evidence"""
@@ -496,6 +549,108 @@ class BaseAgent(ABC):
         if self.perspective == DebatePerspective.CONSERVATIVE:
             # Conservative agents emphasize all risks
             return risks
+        elif self.perspective == DebatePerspective.AGGRESSIVE:
+            # Aggressive agents focus on opportunity cost risks
+            return [r for r in risks if "opportunity" in r.lower() or "timing" in r.lower()]
+        else:
+            # Balanced/Specialist agents consider systematic risks
+            return [r for r in risks if any(word in r.lower() for word in ["systematic", "market", "economic"])]
+    
+    def _suggest_risk_mitigation(self, risks: List[str]) -> List[str]:
+        """Suggest risk mitigation strategies"""
+        
+        mitigation_strategies = []
+        
+        for risk in risks[:3]:  # Top 3 risks
+            if "market" in risk.lower():
+                mitigation_strategies.append("Diversification across asset classes")
+            elif "timing" in risk.lower():
+                mitigation_strategies.append("Dollar-cost averaging approach")
+            elif "volatility" in risk.lower():
+                mitigation_strategies.append("Options hedging strategies")
+            else:
+                mitigation_strategies.append(f"Monitor and adjust for {risk.lower()}")
+        
+        return mitigation_strategies
+    
+    def _generate_implementation_recommendations(self, stance: str, arguments: List[str], risk_assessment: Dict) -> List[str]:
+        """Generate implementation recommendations"""
+        
+        recommendations = []
+        
+        # Base recommendation from stance
+        recommendations.append(f"Implement {stance} with appropriate risk controls")
+        
+        # Add risk-specific recommendations
+        for strategy in risk_assessment.get("mitigation_strategies", []):
+            recommendations.append(f"Apply {strategy}")
+        
+        # Add perspective-specific implementation advice
+        if self.perspective == DebatePerspective.CONSERVATIVE:
+            recommendations.append("Phase implementation gradually to minimize risk")
+        elif self.perspective == DebatePerspective.AGGRESSIVE:
+            recommendations.append("Move quickly to capture time-sensitive opportunities")
+        
+        return recommendations[:3]  # Limit to 3 key recommendations
+    
+    def _create_position_rationale(self, stance: str, arguments: List[str], evidence: List[Dict]) -> str:
+        """Create rationale for the position"""
+        
+        evidence_summary = f"Based on {len(evidence)} pieces of evidence"
+        argument_summary = f"supported by {len(arguments)} key arguments"
+        
+        return f"{stance} {evidence_summary} {argument_summary}, aligning with {self.perspective.value} investment philosophy"
+    
+    # Additional helper methods for debate functionality
+    
+    def _calculate_position_confidence(self, position: Dict, evidence: List[Dict]) -> float:
+        """Calculate confidence in the formulated position"""
+        
+        # Base confidence from evidence quality
+        evidence_confidence = sum(ev.get("confidence", 0.5) for ev in evidence) / len(evidence) if evidence else 0.5
+        
+        # Adjust for agent's confidence threshold
+        threshold_adjustment = min(evidence_confidence / self.debate_config["confidence_threshold"], 1.0)
+        
+        # Adjust for position strength
+        argument_strength = len(position.get("arguments", [])) / 5.0  # Normalize to 5 arguments
+        
+        # Combine factors
+        final_confidence = (evidence_confidence * 0.6 + threshold_adjustment * 0.3 + argument_strength * 0.1)
+        
+        return min(max(final_confidence, 0.1), 0.95)  # Clamp between 0.1 and 0.95
+    
+    async def _prepare_counter_arguments(self, position: Dict, debate_context: Dict) -> Dict:
+        """Prepare responses to expected counter-arguments"""
+        
+        expected_challenges = self._predict_likely_challenges(position, debate_context)
+        prepared_responses = []
+        
+        for challenge in expected_challenges:
+            response = await self._prepare_response_to_challenge(challenge, position)
+            prepared_responses.append({
+                "challenge": challenge,
+                "response": response
+            })
+        
+        return {
+            "expected_challenges": expected_challenges,
+            "prepared_responses": prepared_responses
+        }
+    
+    def _predict_likely_challenges(self, position: Dict, debate_context: Dict) -> List[str]:
+        """Predict likely challenges from other agents"""
+        
+        other_agents = debate_context.get("other_participants", [])
+        challenges = []
+        
+        # Predict challenges based on opposing perspectives
+        if self.perspective == DebatePerspective.CONSERVATIVE:
+            challenges.extend([
+                "Overly cautious approach may miss opportunities",
+                "Risk assessment may be too pessimistic",
+                "Historical data may not predict future performance"
+            ])
         elif self.perspective == DebatePerspective.AGGRESSIVE:
             challenges.extend([
                 "Excessive risk-taking may lead to significant losses",
@@ -840,6 +995,20 @@ class BaseAgent(ABC):
         pass
 
 
+# Base Financial Agent class for compatibility
+class BaseFinancialAgent(BaseAgent):
+    """Base Financial Agent class for backward compatibility"""
+    
+    def __init__(self, agent_id: str, perspective: DebatePerspective = DebatePerspective.BALANCED):
+        super().__init__(agent_id, perspective)
+    
+    async def analyze(self, query: str, context: Dict = None) -> Dict:
+        """Standard analysis method for compatibility"""
+        if context is None:
+            context = {}
+        return await self.execute_specialized_analysis(query, context)
+
+
 # Example Implementation for QuantitativeAnalystAgent
 class QuantitativeAnalystAgent(BaseAgent):
     """Conservative, risk-focused quantitative analyst with debate capabilities"""
@@ -943,77 +1112,3 @@ class QuantitativeAnalystAgent(BaseAgent):
             "active_jobs": 0,
             "capabilities": self.debate_strengths
         }
-            # Aggressive agents focus on opportunity cost risks
-            return [r for r in risks if "opportunity" in r.lower() or "timing" in r.lower()]
-        else:
-            # Balanced/Specialist agents consider systematic risks
-            return [r for r in risks if any(word in r.lower() for word in ["systematic", "market", "economic"])]
-    
-    def _suggest_risk_mitigation(self, risks: List[str]) -> List[str]:
-        """Suggest risk mitigation strategies"""
-        
-        mitigation_strategies = []
-        
-        for risk in risks[:3]:  # Top 3 risks
-            if "market" in risk.lower():
-                mitigation_strategies.append("Diversification across asset classes")
-            elif "timing" in risk.lower():
-                mitigation_strategies.append("Dollar-cost averaging approach")
-            elif "volatility" in risk.lower():
-                mitigation_strategies.append("Options hedging strategies")
-            else:
-                mitigation_strategies.append(f"Monitor and adjust for {risk.lower()}")
-        
-        return mitigation_strategies
-    
-    # Additional helper methods for debate functionality
-    
-    def _calculate_position_confidence(self, position: Dict, evidence: List[Dict]) -> float:
-        """Calculate confidence in the formulated position"""
-        
-        # Base confidence from evidence quality
-        evidence_confidence = sum(ev.get("confidence", 0.5) for ev in evidence) / len(evidence) if evidence else 0.5
-        
-        # Adjust for agent's confidence threshold
-        threshold_adjustment = min(evidence_confidence / self.debate_config["confidence_threshold"], 1.0)
-        
-        # Adjust for position strength
-        argument_strength = len(position.get("arguments", [])) / 5.0  # Normalize to 5 arguments
-        
-        # Combine factors
-        final_confidence = (evidence_confidence * 0.6 + threshold_adjustment * 0.3 + argument_strength * 0.1)
-        
-        return min(max(final_confidence, 0.1), 0.95)  # Clamp between 0.1 and 0.95
-    
-    async def _prepare_counter_arguments(self, position: Dict, debate_context: Dict) -> Dict:
-        """Prepare responses to expected counter-arguments"""
-        
-        expected_challenges = self._predict_likely_challenges(position, debate_context)
-        prepared_responses = []
-        
-        for challenge in expected_challenges:
-            response = await self._prepare_response_to_challenge(challenge, position)
-            prepared_responses.append({
-                "challenge": challenge,
-                "response": response
-            })
-        
-        return {
-            "expected_challenges": expected_challenges,
-            "prepared_responses": prepared_responses
-        }
-    
-    def _predict_likely_challenges(self, position: Dict, debate_context: Dict) -> List[str]:
-        """Predict likely challenges from other agents"""
-        
-        other_agents = debate_context.get("other_participants", [])
-        challenges = []
-        
-        # Predict challenges based on opposing perspectives
-        if self.perspective == DebatePerspective.CONSERVATIVE:
-            challenges.extend([
-                "Overly cautious approach may miss opportunities",
-                "Risk assessment may be too pessimistic",
-                "Historical data may not predict future performance"
-            ])
-        elif self
