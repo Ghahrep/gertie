@@ -683,39 +683,3 @@ async def calculate_and_store_portfolio_risk(
 
 
 async def trigger_risk_monitoring_for_user(user_id: str, portfolios: List[Dict]) -> List[Dict]:
-    """
-    # services/risk_attribution_service.py
-"""
-Risk Attribution Service
-Integrates with your existing services to provide complete risk monitoring
-"""
-
-import asyncio
-import logging
-from typing import Dict, List, Optional
-from datetime import datetime, timezone
-
-# Import your existing services
-from services.risk_calculator import RiskCalculator
-from services.proactive_monitor import get_proactive_monitor
-
-# Import your existing database setup
-from db.session import get_db
-from db.crud.risk import RiskCRUD
-
-logger = logging.getLogger(__name__)
-
-class RiskAttributionService:
-    """
-    Centralized service that connects risk calculation, storage, and monitoring
-    Integrates with your existing platform architecture
-    """
-    
-    def __init__(self):
-        self.risk_calculator = RiskCalculator()
-        self.proactive_monitor = None
-        self._initialized = False
-    
-    async def initialize(self):
-        """Initialize the service with your existing components"""
-        try:

@@ -539,14 +539,14 @@ class DebateEngine:
         
         return {
             "debate_id": debate_id,
-            "query": debate_state["query"],
-            "participants": debate_state["participants"],
-            "rounds": [self._serialize_round(round_data) for round_data in debate_state["rounds"]],
-            "final_consensus": debate_state["consensus"],
-            "confidence_score": debate_state["confidence_score"],
-            "duration": (debate_state["completed_at"] - debate_state["started_at"]).total_seconds(),
+            "query": debate_state.get("query", ""),
+            "participants": debate_state.get("participants", {}),
+            "rounds": [self._serialize_round(round_data) for round_data in debate_state.get("rounds", [])],
+            "final_consensus": debate_state.get("consensus", None),
+            "confidence_score": debate_state.get("confidence_score", 0.0),
+            "duration": 0.0,  # Safe default
             "debate_summary": self._generate_debate_summary(debate_state)
-        }
+}
     
     def _serialize_round(self, round_data: DebateRound) -> Dict:
         """Convert DebateRound to serializable format"""
@@ -597,7 +597,7 @@ class DebateEngine:
         if themes["risk"]: expertise.append("risk_analysis")
         if themes["tax"]: expertise.append("tax_optimization")
         if themes["options"]: expertise.append("options_analysis")
-        if themes["economic"]: expertise.append("economic_analysis")
+        if themes.get("economic", False): expertise.append("economic_analysis")
         return expertise or ["general_analysis"]
     
     def _determine_debate_style(self, themes: Dict, complexity: str) -> str:

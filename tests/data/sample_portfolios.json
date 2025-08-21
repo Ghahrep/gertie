@@ -1,0 +1,25 @@
+{
+  "test_portfolio_1": {
+    "portfolio_id": "test_portfolio_1",
+    "user_id": "test_user_123",
+    "holdings": [
+      {
+        "symbol": "AAPL",
+        "shares": 100,
+        "cost_basis": 150.0
+      },
+      {
+        "symbol": "MSFT",
+        "shares": 50,
+        "cost_basis": 300.0
+      },
+      {
+        "symbol": "TSLA",
+        "shares": 25,
+        "cost_basis": 800.0
+      }
+    ],
+    "cash_balance": 10000.0,
+    "risk_tolerance": "moderate"
+  }
+}

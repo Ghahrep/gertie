@@ -1,0 +1,26 @@
+# Core testing framework
+pytest>=7.0.0
+pytest-asyncio>=0.21.0
+pytest-cov>=4.0.0
+pytest-mock>=3.10.0
+pytest-xdist>=3.0.0
+pytest-html>=3.1.0
+pytest-timeout>=2.1.0
+
+# HTTP testing
+httpx>=0.24.0
+requests>=2.31.0
+
+# FastAPI testing
+fastapi[all]>=0.100.0
+uvicorn>=0.22.0
+
+# Data validation
+pydantic>=2.0.0
+
+# Performance monitoring
+psutil>=5.9.0
+memory-profiler>=0.60.0
+
+# Async utilities
+aiofiles>=23.1.0

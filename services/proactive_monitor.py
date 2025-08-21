@@ -580,20 +580,18 @@ This is a proactive risk alert requiring urgent attention.
         """Get list of actively monitored portfolios"""
         return list(self.active_monitors.keys())
     
-    def get_portfolio_alerts(self, portfolio_id: str, limit: int = 50) -> List[Dict]:
-        """Get alerts for a specific portfolio"""
+    def get_portfolio_alerts(self, portfolio_id: str) -> List[Dict]:
+        """Get all alerts for a specific portfolio"""
         portfolio_alerts = [
             alert for alert in self.alert_history 
             if alert.portfolio_id == portfolio_id
         ]
         
-        # Sort by timestamp (most recent first)
-        portfolio_alerts.sort(key=lambda x: x.timestamp, reverse=True)
-        
-        # Convert to dict format and limit results
+        # Convert to dictionaries for API compatibility
         return [
             {
                 "alert_id": alert.alert_id,
+                "portfolio_id": alert.portfolio_id,
                 "alert_type": alert.alert_type.value,
                 "priority": alert.priority.value,
                 "message": alert.message,
@@ -601,7 +599,7 @@ This is a proactive risk alert requiring urgent attention.
                 "timestamp": alert.timestamp.isoformat(),
                 "resolved": alert.resolved
             }
-            for alert in portfolio_alerts[:limit]
+            for alert in portfolio_alerts
         ]
     
     async def resolve_alert(self, alert_id: str) -> bool:

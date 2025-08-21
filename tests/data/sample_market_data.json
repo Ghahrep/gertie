@@ -1,0 +1,17 @@
+{
+  "AAPL": {
+    "price": 175.5,
+    "change": 2.5,
+    "volume": 50000000
+  },
+  "MSFT": {
+    "price": 350.25,
+    "change": -1.75,
+    "volume": 30000000
+  },
+  "TSLA": {
+    "price": 250.0,
+    "change": 15.0,
+    "volume": 80000000
+  }
+}

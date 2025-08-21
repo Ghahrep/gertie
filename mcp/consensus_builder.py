@@ -79,7 +79,7 @@ class ConsensusBuilder:
         consensus = self._build_consensus_from_majority(majority_group, agent_weights)
         
         # Preserve important minority opinions
-        preserved_minorities = self._preserve_minority_opinions(minority_groups, agent_weights, consensus)
+        preserved_minorities = self.preserve_minority_opinions(minority_groups, agent_weights, consensus)
         
         # Calculate overall confidence
         overall_confidence = self._calculate_overall_confidence(
