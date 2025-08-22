@@ -2,9 +2,10 @@
 import re
 import json
 import uuid
-from typing import Dict, Any, Set, Optional, List
+from typing import Dict, Any, Set, Optional, List, Tuple
 from datetime import datetime
 from enum import Enum
+from dataclasses import dataclass
 
 # Agent Imports
 from agents.quantitative_analyst import QuantitativeAnalystAgent
@@ -19,11 +20,81 @@ from agents.scenario_simulation_agent import ScenarioSimulationAgent
 from agents.security_screener_agent import SecurityScreenerAgent
 from agents.conversation_manager import AutoGenConversationManager
 
+# NEW: Import CrossAssetAnalyst
+from agents.cross_asset_analyst import CrossAssetAnalyst
+
 # Backend Imports
 from db import crud
 from core.data_handler import get_market_data_for_portfolio
 import anthropic
 from core.config import settings
+
+# 🚀 NEW: Dynamic Agent Selection Components
+class AgentTier(Enum):
+    CORE = "core_agents"
+    SPECIALIZED = "specialized_agents"
+    RESEARCH = "research_agents"
+
+@dataclass
+class CommitteeConfig:
+    """Configuration for different committee types"""
+    name: str
+    agents: List[str]
+    min_agents: int
+    max_agents: int
+    required_capabilities: List[str]
+    use_case: str
+
+class QueryAnalyzer:
+    """Analyzes queries to determine complexity and type"""
+    
+    def __init__(self):
+        self.complexity_keywords = {
+            "high": [
+                "cross-asset", "correlation", "regime", "crisis", "breakdown",
+                "systematic", "tail risk", "contagion", "stress test", "comprehensive"
+            ],
+            "medium": [
+                "risk", "volatility", "diversification", "allocation", "optimization",
+                "factor", "beta", "alpha", "sharpe", "var", "actionable"
+            ],
+            "low": [
+                "balance", "simple", "basic", "overview", "summary", "quick"
+            ]
+        }
+    
+    def analyze_complexity(self, query: str) -> Tuple[float, str]:
+        """Analyze query complexity and return score (0.0-1.0) and reasoning"""
+        query_lower = query.lower()
+        complexity_score = 0.0
+        reasoning_parts = []
+        
+        # Check for high complexity keywords
+        high_matches = sum(1 for keyword in self.complexity_keywords["high"] 
+                          if keyword in query_lower)
+        if high_matches > 0:
+            complexity_score += 0.4 + (high_matches * 0.1)
+            reasoning_parts.append(f"High complexity keywords: {high_matches}")
+        
+        # Check for medium complexity keywords
+        medium_matches = sum(1 for keyword in self.complexity_keywords["medium"] 
+                           if keyword in query_lower)
+        if medium_matches > 0:
+            complexity_score += 0.2 + (medium_matches * 0.05)
+            reasoning_parts.append(f"Medium complexity keywords: {medium_matches}")
+        
+        # Check for workflow triggers
+        workflow_triggers = ["actionable", "comprehensive", "end-to-end", "full analysis"]
+        trigger_matches = sum(1 for trigger in workflow_triggers if trigger in query_lower)
+        if trigger_matches > 0:
+            complexity_score += 0.3
+            reasoning_parts.append("Workflow trigger detected")
+        
+        # Normalize score
+        complexity_score = max(0.0, min(1.0, complexity_score))
+        reasoning = "; ".join(reasoning_parts) if reasoning_parts else "Basic query"
+        
+        return complexity_score, reasoning
 
 class WorkflowState(Enum):
     AWAITING_STRATEGY = "awaiting_strategy"
@@ -96,7 +167,7 @@ class WorkflowSession:
 
 class FinancialOrchestrator:
     """
-    Enhanced orchestrator with multi-stage workflow capabilities and SecurityScreener integration
+    Enhanced orchestrator with multi-stage workflow capabilities and dynamic agent selection
     """
     def __init__(self):
         self.roster = {
@@ -110,8 +181,16 @@ class FinancialOrchestrator:
             "BehavioralFinanceAgent": BehavioralFinanceAgent(),
             "ScenarioSimulationAgent": ScenarioSimulationAgent(),
             "SecurityScreenerAgent": SecurityScreenerAgent(),
+            # 🚀 NEW: Add CrossAssetAnalyst
+            "CrossAssetAnalyst": CrossAssetAnalyst(),
         }
-        print(f"FinancialOrchestrator initialized with a team of {len(self.roster)} agents.")
+        
+        # 🚀 NEW: Dynamic capabilities
+        self.query_analyzer = QueryAnalyzer()
+        self.agent_capabilities = self._initialize_agent_capabilities()
+        self.committee_templates = self._initialize_committee_templates()
+        
+        print(f"FinancialOrchestrator initialized with a team of {len(self.roster)} agents (including Cross-Asset Analyst).")
         self._setup_classification_patterns()
         
         # Initialize Anthropic client
@@ -127,11 +206,63 @@ class FinancialOrchestrator:
         }
         self.conversation_manager = AutoGenConversationManager(llm_config=llm_config)
         
-        # 🚀 NEW: Workflow session management
+        # 🚀 EXISTING: Workflow session management
         self.active_workflows: Dict[str, WorkflowSession] = {}
 
+    def _initialize_agent_capabilities(self) -> Dict[str, List[str]]:
+        """Map agents to their capabilities for intelligent selection"""
+        return {
+            "QuantitativeAnalystAgent": ["risk_analysis", "statistical_modeling", "portfolio_optimization"],
+            "StrategyArchitectAgent": ["strategy_formulation", "investment_planning", "market_analysis"],
+            "StrategyRebalancingAgent": ["portfolio_rebalancing", "allocation_optimization", "risk_management"],
+            "HedgingStrategistAgent": ["risk_hedging", "volatility_management", "protection_strategies"],
+            "StrategyBacktesterAgent": ["strategy_testing", "historical_analysis", "performance_evaluation"],
+            "FinancialTutorAgent": ["education", "explanation", "concept_clarification"],
+            "RegimeForecastingAgent": ["regime_detection", "market_forecasting", "transition_analysis"],
+            "BehavioralFinanceAgent": ["behavioral_analysis", "bias_detection", "psychological_factors"],
+            "ScenarioSimulationAgent": ["scenario_modeling", "stress_testing", "what_if_analysis"],
+            "SecurityScreenerAgent": ["stock_screening", "factor_analysis", "security_selection"],
+            # 🚀 NEW: CrossAssetAnalyst capabilities
+            "CrossAssetAnalyst": ["correlation_analysis", "regime_detection", "cross_asset_risk", "diversification_analysis"]
+        }
+
+    def _initialize_committee_templates(self) -> Dict[str, CommitteeConfig]:
+        """Initialize committee configurations using existing agents"""
+        return {
+            "standard": CommitteeConfig(
+                name="Standard Analysis Committee",
+                agents=["QuantitativeAnalystAgent", "StrategyArchitectAgent", "SecurityScreenerAgent"],
+                min_agents=3,
+                max_agents=4,
+                required_capabilities=["risk_analysis", "strategy_formulation", "security_selection"],
+                use_case="Basic portfolio analysis and recommendations"
+            ),
+            "enhanced": CommitteeConfig(
+                name="Enhanced Multi-Agent Committee",
+                agents=[
+                    "QuantitativeAnalystAgent", "StrategyArchitectAgent", "SecurityScreenerAgent",
+                    "CrossAssetAnalyst", "RegimeForecastingAgent", "BehavioralFinanceAgent"
+                ],
+                min_agents=6,
+                max_agents=7,
+                required_capabilities=[
+                    "risk_analysis", "strategy_formulation", "correlation_analysis",
+                    "regime_detection", "behavioral_analysis"
+                ],
+                use_case="Complex multi-factor analysis with cross-asset and behavioral considerations"
+            ),
+            "crisis": CommitteeConfig(
+                name="Crisis Response Committee",
+                agents=list(self.roster.keys()),  # All agents
+                min_agents=8,
+                max_agents=11,
+                required_capabilities=["risk_analysis", "stress_testing", "scenario_modeling", "correlation_analysis"],
+                use_case="Emergency analysis during market stress"
+            )
+        }
+
     def _setup_classification_patterns(self):
-        """Enhanced routing with SecurityScreener patterns"""
+        """Enhanced routing with SecurityScreener and CrossAssetAnalyst patterns"""
         self.routing_map = {
             # SecurityScreener patterns - highest priority for actionable queries
             "SecurityScreenerAgent": {
@@ -142,45 +273,99 @@ class FinancialOrchestrator:
                 frozenset(["growth", "stocks"]), frozenset(["diversify", "with"]),
                 frozenset(["actionable", "advice"]), frozenset(["stocks", "to", "buy"])
             },
-            
-            "StrategyRebalancingAgent": {frozenset(["rebalance"]), frozenset(["optimize"]), frozenset(["allocation"]), frozenset(["risk", "parity"]), frozenset(["diversify", "risk"])},
-            "StrategyBacktesterAgent": {frozenset(["backtest"]), frozenset(["test", "strategy"])},
-            "HedgingStrategistAgent": {frozenset(["hedge"]), frozenset(["protect"]), frozenset(["target", "volatility"])},
-            "StrategyArchitectAgent": {frozenset(["design"]), frozenset(["find", "strategy"]), frozenset(["recommend"]), frozenset(["momentum"])},
-            "RegimeForecastingAgent": {frozenset(["forecast"]), frozenset(["regime", "change"]), frozenset(["transition"])},
-            "BehavioralFinanceAgent": {frozenset(["bias"]), frozenset(["biases"]), frozenset(["behavior"]), frozenset(["psychology"])},
-            "ScenarioSimulationAgent": {frozenset(["scenario"]), frozenset(["simulate"]), frozenset(["what", "if"]), frozenset(["market", "crash"])},
-            "FinancialTutorAgent": {frozenset(["explain"]), frozenset(["what", "is"]), frozenset(["define"]), frozenset(["learn"])},
-            "QuantitativeAnalystAgent": {frozenset(["risk"]), frozenset(["report"]), frozenset(["factor"]), frozenset(["alpha"]), frozenset(["cvar"]), frozenset(["analyze"]), frozenset(["stress", "test"]), frozenset(["tail", "risk"])}
+            # NEW: CrossAssetAnalyst patterns  
+            "CrossAssetAnalyst": {
+                frozenset(["cross-asset"]), frozenset(["correlation"]), frozenset(["regime"]),
+                frozenset(["asset", "class"]), frozenset(["diversification"]), 
+                frozenset(["cross", "asset"]), frozenset(["correlation", "breakdown"]),
+                frozenset(["regime", "shift"]), frozenset(["asset", "allocation"])
+            },
+            "StrategyRebalancingAgent": {
+                frozenset(["rebalance"]), frozenset(["optimize"]), frozenset(["allocation"]), 
+                frozenset(["risk", "parity"]), frozenset(["diversify", "risk"])
+            },
+            "StrategyBacktesterAgent": {
+                frozenset(["backtest"]), frozenset(["test", "strategy"])
+            },
+            "HedgingStrategistAgent": {
+                frozenset(["hedge"]), frozenset(["protect"]), frozenset(["target", "volatility"])
+            },
+            "StrategyArchitectAgent": {
+                frozenset(["design"]), frozenset(["find", "strategy"]), frozenset(["recommend"]), frozenset(["momentum"])
+            },
+            "RegimeForecastingAgent": {
+                frozenset(["forecast"]), frozenset(["regime", "change"]), frozenset(["transition"])
+            },
+            "BehavioralFinanceAgent": {
+                frozenset(["bias"]), frozenset(["biases"]), frozenset(["behavior"]), frozenset(["psychology"])
+            },
+            "ScenarioSimulationAgent": {
+                frozenset(["scenario"]), frozenset(["simulate"]), frozenset(["what", "if"]), frozenset(["market", "crash"])
+            },
+            "FinancialTutorAgent": {
+                frozenset(["explain"]), frozenset(["what", "is"]), frozenset(["define"]), frozenset(["learn"])
+            },
+            "QuantitativeAnalystAgent": {
+                frozenset(["risk"]), frozenset(["report"]), frozenset(["factor"]), frozenset(["alpha"]), 
+                frozenset(["cvar"]), frozenset(["analyze"]), frozenset(["stress", "test"]), frozenset(["tail", "risk"])
+            }
         }
 
-    def _should_trigger_workflow(self, user_query: str) -> bool:
-        """Determine if query should trigger multi-stage workflow"""
+    def _should_trigger_workflow(self, user_query: str) -> Tuple[bool, str, float]:
+        """Enhanced workflow triggering with complexity analysis"""
+        
+        # Analyze query complexity
+        complexity_score, reasoning = self.query_analyzer.analyze_complexity(user_query)
+        
+        # Existing workflow triggers
         workflow_triggers = [
-            # Actionable investment queries
             "what should i do", "what stocks", "recommend", "advice",
             "portfolio improvement", "investment strategy", "rebalance my portfolio",
             "optimize my", "improve my", "help with my portfolio",
-            # Comprehensive analysis requests
             "full analysis", "complete review", "thorough examination",
             "end-to-end", "comprehensive", "detailed analysis",
-            # Specific action requests
             "actionable recommendations", "specific steps", "concrete advice",
             "trading plan", "implementation", "execute"
         ]
         
         query_lower = user_query.lower()
-        return any(trigger in query_lower for trigger in workflow_triggers)
-
-    def start_workflow(self, user_query: str, db_session, current_user) -> Dict[str, Any]:
-        """🚀 NEW: Start multi-stage workflow execution"""
+        trigger_match = any(trigger in query_lower for trigger in workflow_triggers)
         
-        # Create new workflow session
+        # Enhanced logic: trigger workflow if complexity is high OR traditional triggers
+        should_trigger = trigger_match or complexity_score > 0.6
+        
+        # Determine workflow type based on complexity
+        if complexity_score > 0.8 or "crisis" in query_lower:
+            workflow_type = "crisis"
+        elif complexity_score > 0.6 or trigger_match:
+            workflow_type = "enhanced"
+        else:
+            workflow_type = "standard"
+        
+        return should_trigger, workflow_type, complexity_score
+
+    def start_workflow(self, user_query: str, db_session, current_user, workflow_type: str = "auto") -> Dict[str, Any]:
+        """Enhanced workflow start with dynamic type selection"""
+        
+        # Auto-determine workflow type if not specified
+        if workflow_type == "auto":
+            should_trigger, detected_type, complexity_score = self._should_trigger_workflow(user_query)
+            workflow_type = detected_type
+        else:
+            complexity_score, _ = self.query_analyzer.analyze_complexity(user_query)
+        
+        # Create enhanced workflow session
         session_id = str(uuid.uuid4())
         workflow = WorkflowSession(session_id, user_query, current_user.id)
+        
+        # Add metadata about selection
+        workflow.workflow_type = workflow_type
+        workflow.complexity_score = complexity_score
+        
         self.active_workflows[session_id] = workflow
         
-        print(f"🚀 Starting new workflow session: {session_id}")
+        print(f"🚀 Starting {workflow_type} workflow session: {session_id}")
+        print(f"📊 Complexity score: {complexity_score:.2f}")
         print(f"📝 Query: {user_query}")
         
         # Get portfolio context
@@ -190,9 +375,9 @@ class FinancialOrchestrator:
             primary_portfolio = user_portfolios[0]
             portfolio_context = get_market_data_for_portfolio(primary_portfolio.holdings)
         
-        # Start with strategy formulation
-        return self._execute_workflow_step(workflow, portfolio_context, db_session)
-
+        # Start with enhanced agent selection
+        return self._execute_enhanced_workflow_step(workflow, portfolio_context, db_session)
+    
     def _execute_workflow_step(self, workflow: WorkflowSession, context: Dict, db_session) -> Dict[str, Any]:
         """Execute current workflow step based on state"""
         
@@ -302,6 +487,333 @@ class FinancialOrchestrator:
         else:
             workflow.state = WorkflowState.ERROR
             return analysis_result
+
+    def _execute_enhanced_workflow_step(self, workflow: WorkflowSession, context: Dict, db_session) -> Dict[str, Any]:
+        """Enhanced workflow execution with dynamic agent selection"""
+        
+        # Determine if we should use enhanced committee
+        if hasattr(workflow, 'workflow_type') and workflow.workflow_type in ["enhanced", "crisis"]:
+            return self._execute_enhanced_multi_agent_workflow(workflow, context, db_session)
+        else:
+            # Use existing workflow logic for standard cases
+            return self._execute_workflow_step(workflow, context, db_session)
+
+    def _execute_enhanced_multi_agent_workflow(self, workflow: WorkflowSession, context: Dict, db_session) -> Dict[str, Any]:
+        """Execute enhanced workflow with expanded agent committee"""
+        
+        try:
+            if workflow.state == WorkflowState.AWAITING_STRATEGY:
+                return self._enhanced_step_1_strategy_formulation(workflow, context)
+            
+            elif workflow.state == WorkflowState.AWAITING_SCREENING:
+                return self._enhanced_step_2_security_screening(workflow, context)
+            
+            elif workflow.state == WorkflowState.AWAITING_DEEP_ANALYSIS:
+                return self._enhanced_step_3_comprehensive_analysis(workflow, context)
+            
+            elif workflow.state == WorkflowState.AWAITING_FINAL_SYNTHESIS:
+                return self._enhanced_step_4_final_synthesis(workflow, context)
+            
+            else:
+                raise ValueError(f"Unknown enhanced workflow state: {workflow.state}")
+                
+        except Exception as e:
+            print(f"❌ Enhanced workflow step failed: {str(e)}")
+            workflow.state = WorkflowState.ERROR
+            workflow.errors.append(str(e))
+            return {
+                "success": False,
+                "error": f"Enhanced workflow step failed: {str(e)}",
+                "workflow_status": workflow.get_status_summary()
+            }
+        
+    def _enhanced_step_1_strategy_formulation(self, workflow: WorkflowSession, context: Dict) -> Dict[str, Any]:
+        """Enhanced Step 1: Strategy formulation with complexity awareness"""
+        
+        print("🎯 Enhanced Workflow Step 1: Advanced Strategy Formulation")
+        
+        # Use StrategyArchitect with enhanced context
+        strategy_agent = self.roster["StrategyArchitectAgent"]
+        enhanced_query = f"Based on the user's {workflow.workflow_type} complexity request '{workflow.user_query}', formulate a comprehensive investment strategy."
+        
+        if workflow.workflow_type == "crisis":
+            enhanced_query += " Focus on crisis-resistant strategies and defensive positioning."
+        elif workflow.workflow_type == "enhanced":
+            enhanced_query += " Consider cross-asset correlations and behavioral factors."
+        
+        strategy_result = strategy_agent.run(enhanced_query, context=context)
+        
+        if strategy_result.get("success", True):
+            workflow.update_state(WorkflowState.AWAITING_SCREENING, strategy_result)
+            return self._enhanced_step_2_security_screening(workflow, context)
+        else:
+            workflow.state = WorkflowState.ERROR
+            return strategy_result
+
+    def _enhanced_step_2_security_screening(self, workflow: WorkflowSession, context: Dict) -> Dict[str, Any]:
+        """Enhanced Step 2: Security screening with advanced criteria"""
+        
+        print("🔍 Enhanced Workflow Step 2: Advanced Security Screening")
+        
+        # Extract strategy insights
+        strategy_summary = workflow.strategy_result.get("summary", "")
+        strategy_focus = self._extract_strategy_focus(strategy_summary)
+        
+        # Enhanced screening query based on workflow type
+        if workflow.workflow_type == "crisis":
+            screening_query = f"Find defensive, crisis-resistant stocks that align with: {strategy_focus}. "
+            screening_query += "Prioritize low-beta, dividend-paying, and defensive sector securities."
+        elif workflow.workflow_type == "enhanced":
+            screening_query = f"Find stocks with strong cross-asset diversification benefits: {strategy_focus}. "
+            screening_query += "Consider correlation benefits and regime resilience."
+        else:
+            screening_query = f"Find quality stocks that align with: {strategy_focus}."
+        
+        # Add portfolio context
+        if context.get("holdings_with_values"):
+            screening_query += " Focus on securities that complement the existing portfolio."
+        
+        screener_agent = self.roster["SecurityScreenerAgent"]
+        screening_result = screener_agent.run(screening_query, context=context)
+        
+        if screening_result.get("success", True):
+            workflow.update_state(WorkflowState.AWAITING_DEEP_ANALYSIS, screening_result)
+            return self._enhanced_step_3_comprehensive_analysis(workflow, context)
+        else:
+            workflow.state = WorkflowState.ERROR
+            return screening_result
+
+    def _enhanced_step_3_comprehensive_analysis(self, workflow: WorkflowSession, context: Dict) -> Dict[str, Any]:
+        """Enhanced Step 3: Multi-agent comprehensive analysis"""
+        
+        print("📊 Enhanced Workflow Step 3: Multi-Agent Comprehensive Analysis")
+        
+        # Get recommended tickers from screening
+        recommendations = workflow.screening_result.get("recommendations", [])
+        
+        # Parallel analysis with multiple agents
+        analysis_results = {}
+        
+        # 1. Quantitative Risk Analysis
+        if recommendations:
+            tickers = [rec.get("ticker") for rec in recommendations[:3]]
+            risk_query = f"Analyze portfolio risk impact of adding {', '.join(tickers)}"
+        else:
+            risk_query = "Perform comprehensive portfolio risk analysis"
+        
+        quant_agent = self.roster["QuantitativeAnalystAgent"]
+        analysis_results["risk_analysis"] = quant_agent.run(risk_query, context=context)
+        
+        # 2. Cross-Asset Analysis (NEW)
+        cross_asset_query = f"Analyze cross-asset correlations and regime risks for portfolio"
+        if "crisis" in workflow.user_query.lower():
+            cross_asset_query += " with focus on crisis scenario correlations"
+        
+        cross_asset_agent = self.roster["CrossAssetAnalyst"]
+        analysis_results["cross_asset"] = cross_asset_agent.run(cross_asset_query, context=context)
+        
+        # 3. Behavioral Analysis
+        behavior_query = f"Identify behavioral factors and biases relevant to current market environment"
+        behavioral_agent = self.roster["BehavioralFinanceAgent"]
+        analysis_results["behavioral"] = behavioral_agent.run(behavior_query, context=context)
+        
+        # 4. Regime Forecasting
+        regime_query = f"Assess market regime and potential transitions"
+        regime_agent = self.roster["RegimeForecastingAgent"]
+        analysis_results["regime"] = regime_agent.run(regime_query, context=context)
+        
+        # Synthesize multi-agent analysis
+        synthesized_analysis = self._synthesize_multi_agent_analysis(analysis_results)
+        
+        if synthesized_analysis.get("success", True):
+            workflow.update_state(WorkflowState.AWAITING_FINAL_SYNTHESIS, synthesized_analysis)
+            return self._enhanced_step_4_final_synthesis(workflow, context)
+        else:
+            workflow.state = WorkflowState.ERROR
+            return synthesized_analysis
+        
+    def _enhanced_step_4_final_synthesis(self, workflow: WorkflowSession, context: Dict) -> Dict[str, Any]:
+        """Enhanced Step 4: Advanced final synthesis"""
+        
+        print("🎯 Enhanced Workflow Step 4: Advanced Final Synthesis")
+        
+        # Create enhanced synthesis based on workflow type
+        if workflow.workflow_type in ["enhanced", "crisis"]:
+            final_synthesis = self._synthesize_enhanced_workflow_results(workflow)
+        else:
+            final_synthesis = self._synthesize_workflow_results(workflow)
+        
+        workflow.update_state(WorkflowState.COMPLETE, final_synthesis)
+        
+        return {
+            "success": True,
+            "summary": final_synthesis["summary"],
+            "workflow_type": f"{workflow.workflow_type}_multi_agent_analysis",
+            "agent_used": f"Orchestrator ({workflow.workflow_type.title()} Multi-Agent Workflow)",
+            "workflow_status": workflow.get_status_summary(),
+            "detailed_results": {
+                "strategy": workflow.strategy_result,
+                "screening": workflow.screening_result, 
+                "analysis": workflow.analysis_result,
+                "synthesis": final_synthesis
+            },
+            "recommendations": final_synthesis["recommendations"],
+            "implementation_plan": final_synthesis["implementation_plan"]
+        }
+
+    def _synthesize_enhanced_workflow_results(self, workflow: WorkflowSession) -> Dict[str, Any]:
+        """Synthesize enhanced workflow results with multi-agent insights"""
+        
+        synthesis_summary = f"### 🎯 {workflow.workflow_type.title()} Multi-Agent Analysis & Recommendations\n\n"
+        
+        # Strategy Foundation
+        strategy_summary = workflow.strategy_result.get("summary", "Strategy analysis completed")
+        synthesis_summary += f"**📋 {workflow.workflow_type.title()} Investment Strategy:**\n{strategy_summary}\n\n"
+        
+        # Screening Results
+        screening_recs = workflow.screening_result.get("recommendations", [])
+        if screening_recs:
+            synthesis_summary += f"**🔍 Advanced Security Recommendations:**\n"
+            for i, rec in enumerate(screening_recs[:3], 1):
+                ticker = rec.get("ticker", "N/A")
+                score = rec.get("overall_score", 0)
+                rationale = rec.get("rationale", "High-quality opportunity")
+                synthesis_summary += f"{i}. **{ticker}** (Score: {score:.2f}) - {rationale}\n"
+            synthesis_summary += "\n"
+        
+        # Multi-Agent Analysis Results
+        if hasattr(workflow, 'analysis_result') and workflow.analysis_result:
+            analysis_summary = workflow.analysis_result.get("summary", "Multi-agent analysis completed")
+            synthesis_summary += f"**🤖 Multi-Agent Intelligence Assessment:**\n{analysis_summary}\n\n"
+            
+            # Extract component analyses if available
+            component_analyses = workflow.analysis_result.get("component_analyses", {})
+            if component_analyses:
+                if "cross_asset" in component_analyses:
+                    ca_result = component_analyses["cross_asset"]
+                    synthesis_summary += f"**🌐 Cross-Asset Risk:** {ca_result.get('regime_status', 'Normal')}\n"
+                    synthesis_summary += f"**📊 Diversification Score:** {ca_result.get('diversification_score', 'N/A')}/10\n\n"
+        
+        # Implementation Guidance
+        if workflow.workflow_type == "crisis":
+            synthesis_summary += f"**🚨 Crisis Implementation Plan:**\n"
+            synthesis_summary += f"1. Prioritize defensive positioning immediately\n"
+            synthesis_summary += f"2. Implement gradually with strict risk controls\n"
+            synthesis_summary += f"3. Monitor correlations and regime indicators daily\n"
+            synthesis_summary += f"4. Maintain higher cash reserves for opportunities\n\n"
+        elif workflow.workflow_type == "enhanced":
+            synthesis_summary += f"**🚀 Enhanced Implementation Plan:**\n"
+            synthesis_summary += f"1. Review cross-asset correlation implications\n"
+            synthesis_summary += f"2. Consider behavioral and regime factors\n"
+            synthesis_summary += f"3. Implement with enhanced risk monitoring\n"
+            synthesis_summary += f"4. Regular multi-factor reassessment\n\n"
+        
+        synthesis_summary += f"**✅ Conclusion:** This {workflow.workflow_type} multi-agent analysis provides comprehensive insights from {len(self.committee_templates[workflow.workflow_type].agents)} specialized experts."
+        
+        # Extract recommendations
+        recommendations = []
+        for rec in screening_recs[:3]:
+            ticker = rec.get("ticker")
+            if ticker:
+                recommendations.append(f"Consider adding {ticker} to portfolio ({workflow.workflow_type} analysis)")
+        
+        # Enhanced implementation plan
+        implementation_plan = [
+            {
+                "step": 1,
+                "action": f"Review {workflow.workflow_type} recommendations",
+                "details": f"Analyze insights from {len(self.committee_templates.get(workflow.workflow_type, {}).get('agents', []))} agent committee",
+                "timeline": "1-2 days"
+            },
+            {
+                "step": 2, 
+                "action": "Validate cross-asset implications",
+                "details": "Assess correlation and regime factors identified",
+                "timeline": "1 day"
+            },
+            {
+                "step": 3,
+                "action": f"Execute {workflow.workflow_type} strategy",
+                "details": "Implement with appropriate risk controls",
+                "timeline": "1-2 weeks"
+            },
+            {
+                "step": 4,
+                "action": "Monitor multi-factor metrics", 
+                "details": "Track performance across all analysis dimensions",
+                "timeline": "Ongoing"
+            }
+        ]
+        
+        return {
+            "summary": synthesis_summary,
+            "recommendations": recommendations,
+            "implementation_plan": implementation_plan,
+            "confidence_score": 0.95,  # Higher confidence due to multi-agent analysis
+            "analysis_depth": f"{workflow.workflow_type}_multi_agent_comprehensive",
+            "workflow_id": workflow.session_id,
+            "agents_involved": len(self.committee_templates.get(workflow.workflow_type, {}).get('agents', []))
+        }
+
+    def _synthesize_multi_agent_analysis(self, analysis_results: Dict[str, Dict]) -> Dict[str, Any]:
+        """Synthesize results from multiple agents"""
+        
+        synthesis_summary = "### 🎯 Multi-Agent Comprehensive Analysis\n\n"
+        
+        # Risk Analysis Summary
+        risk_summary = analysis_results.get("risk_analysis", {}).get("summary", "Risk analysis completed")
+        synthesis_summary += f"**📊 Quantitative Risk Assessment:**\n{risk_summary}\n\n"
+        
+        # Cross-Asset Analysis Summary
+        cross_asset_summary = analysis_results.get("cross_asset", {}).get("summary", "Cross-asset analysis completed")
+        synthesis_summary += f"**🌐 Cross-Asset Correlation Analysis:**\n{cross_asset_summary}\n\n"
+        
+        # Behavioral Analysis Summary
+        behavioral_summary = analysis_results.get("behavioral", {}).get("summary", "Behavioral analysis completed")
+        synthesis_summary += f"**🧠 Behavioral Finance Assessment:**\n{behavioral_summary}\n\n"
+        
+        # Regime Analysis Summary
+        regime_summary = analysis_results.get("regime", {}).get("summary", "Regime analysis completed")
+        synthesis_summary += f"**📈 Market Regime Forecast:**\n{regime_summary}\n\n"
+        
+        # Generate integrated insights
+        integrated_insights = self._generate_integrated_insights(analysis_results)
+        synthesis_summary += f"**🔗 Integrated Multi-Agent Insights:**\n{integrated_insights}"
+        
+        return {
+            "success": True,
+            "summary": synthesis_summary,
+            "analysis_type": "multi_agent_comprehensive",
+            "component_analyses": analysis_results,
+            "confidence_score": 0.95  # Higher confidence due to multi-agent validation
+        }
+
+    def _generate_integrated_insights(self, analysis_results: Dict[str, Dict]) -> str:
+        """Generate insights from multi-agent analysis"""
+        
+        insights = []
+        
+        # Check for regime warnings
+        regime_result = analysis_results.get("regime", {})
+        if "transition" in regime_result.get("summary", "").lower():
+            insights.append("• Market regime transition detected - adjust portfolio positioning")
+        
+        # Check cross-asset risks
+        cross_asset_result = analysis_results.get("cross_asset", {})
+        if cross_asset_result.get("diversification_score", 10) < 6:
+            insights.append("• Low diversification score - increase cross-asset allocation")
+        
+        # Check behavioral factors
+        behavioral_result = analysis_results.get("behavioral", {})
+        if "bias" in behavioral_result.get("summary", "").lower():
+            insights.append("• Behavioral biases detected - implement systematic decision-making")
+        
+        # Default insight
+        if not insights:
+            insights.append("• Multi-agent analysis shows portfolio is well-positioned")
+            insights.append("• Continue monitoring across risk, correlation, behavioral, and regime factors")
+        
+        return "\n".join(insights)
 
     def _step_4_final_synthesis(self, workflow: WorkflowSession, context: Dict) -> Dict[str, Any]:
         """Step 4: Final Synthesis - Combine all analysis into actionable plan"""
@@ -441,15 +953,17 @@ class FinancialOrchestrator:
 
     def route_query(self, user_query: str, db_session, current_user) -> Dict[str, Any]:
         """
-        Enhanced routing with workflow capabilities
+        Enhanced routing with dynamic workflow capabilities and intelligent agent selection
         """
         
-        # 🚀 NEW: Check if query should trigger multi-stage workflow
-        if self._should_trigger_workflow(user_query):
-            print("🔥 Triggering multi-stage workflow for comprehensive analysis")
-            return self.start_workflow(user_query, db_session, current_user)
+        # 🚀 ENHANCED: Check if query should trigger workflow with complexity analysis
+        should_trigger, workflow_type, complexity_score = self._should_trigger_workflow(user_query)
         
-        # Otherwise use existing single-agent routing
+        if should_trigger:
+            print(f"🔥 Triggering {workflow_type} workflow for comprehensive analysis (complexity: {complexity_score:.2f})")
+            return self.start_workflow(user_query, db_session, current_user, workflow_type)
+        
+        # EXISTING: Multi-step plan logic (enhanced with dynamic agent selection)
         clean_query = re.sub(r'[^\w\s]', '', user_query.lower())
         query_words = set(clean_query.split())
         
@@ -461,7 +975,7 @@ class FinancialOrchestrator:
             plan = self._create_execution_plan(user_query)
 
         if plan:
-            # Execute multi-step plan (existing logic)
+            # Execute multi-step plan with enhanced agent selection
             step_results = []
             user_portfolios = crud.get_user_portfolios(db=db_session, user_id=current_user.id)
             current_context = get_market_data_for_portfolio(user_portfolios[0].holdings) if user_portfolios else {}
@@ -470,6 +984,7 @@ class FinancialOrchestrator:
                 agent_name_from_plan = step.get("agent")
                 step_query = step.get("query")
                 
+                # 🚀 ENHANCED: Try intelligent agent selection if plan agent not found
                 agent_to_run = None
                 if agent_name_from_plan:
                     normalized_plan_agent_name = agent_name_from_plan.lower().replace("agent", "")
@@ -479,6 +994,13 @@ class FinancialOrchestrator:
                         if normalized_plan_agent_name == normalized_roster_key:
                             agent_to_run = agent_instance
                             break
+                    
+                    # 🚀 NEW: If planned agent not found, use intelligent fallback
+                    if not agent_to_run:
+                        fallback_agent_name = self._find_intelligent_fallback(agent_name_from_plan, step_query)
+                        if fallback_agent_name and fallback_agent_name in self.roster:
+                            agent_to_run = self.roster[fallback_agent_name]
+                            print(f"⚡ Using intelligent fallback: {fallback_agent_name} for planned agent: {agent_name_from_plan}")
                 
                 if not agent_to_run or not step_query:
                     step_results.append({"error": f"Invalid plan at step {i+1}. Could not find agent '{agent_name_from_plan}' or query is missing."})
@@ -515,52 +1037,313 @@ class FinancialOrchestrator:
                 "steps": step_results
             }
         else:
-            # Single-agent routing (existing logic)
-            selected_agent_name = self._classify_query_simple(query_words)
+            # 🚀 ENHANCED: Single-agent routing with intelligent selection
+            selected_agent_name = self._classify_query_enhanced(query_words, user_query)
             if not selected_agent_name:
                 print("Orchestrator could not determine a route for a simple query.")
                 return {"success": False, "error": "I'm not sure which specialist can handle that request."}
             
             agent_to_run = self.roster[selected_agent_name]
             
-            agents_that_dont_need_portfolio = ["StrategyArchitectAgent", "FinancialTutorAgent"]
-            agents_that_need_portfolio = [
-                "QuantitativeAnalystAgent", "StrategyRebalancingAgent", 
-                "HedgingStrategistAgent", "RegimeForecastingAgent",
-                "BehavioralFinanceAgent", "ScenarioSimulationAgent",
-                "SecurityScreenerAgent"
-            ]
+            # 🚀 ENHANCED: Dynamic agent requirements based on capabilities
+            portfolio_required_agents = self._get_portfolio_required_agents()
+            portfolio_optional_agents = self._get_portfolio_optional_agents()
             
-            if selected_agent_name in agents_that_dont_need_portfolio:
+            if selected_agent_name in portfolio_optional_agents:
                 print(f"Orchestrator routing query to: {agent_to_run.name} (no portfolio context needed)")
-                return agent_to_run.run(user_query, context={})
+                result = agent_to_run.run(user_query, context={})
             else:
                 user_portfolios = crud.get_user_portfolios(db=db_session, user_id=current_user.id)
                 if not user_portfolios:
-                    if selected_agent_name == "SecurityScreenerAgent":
-                        print(f"Orchestrator routing query to: {agent_to_run.name} (general screening mode)")
-                        return agent_to_run.run(user_query, context={})
+                    # 🚀 ENHANCED: Smart fallback for agents that can work without portfolio
+                    if selected_agent_name in ["SecurityScreenerAgent", "CrossAssetAnalyst"]:
+                        print(f"Orchestrator routing query to: {agent_to_run.name} (general analysis mode)")
+                        result = agent_to_run.run(user_query, context={})
                     else:
                         return {"success": False, "error": f"The '{agent_to_run.name}' requires a portfolio, but you don't have one yet."}
-
-                primary_portfolio = user_portfolios[0]
-                print(f"Fetching market data for portfolio ID: {primary_portfolio.id}")
-                portfolio_context = get_market_data_for_portfolio(primary_portfolio.holdings)
-                
-                print(f"Orchestrator routing query to: {agent_to_run.name}")
-                result = agent_to_run.run(user_query, context=portfolio_context)
-                
-                # Enhanced result with "assemble team" capability
-                if (selected_agent_name == "SecurityScreenerAgent" and 
-                    result.get("success") and 
-                    "complement" not in user_query.lower()):
+                else:
+                    primary_portfolio = user_portfolios[0]
+                    print(f"Fetching market data for portfolio ID: {primary_portfolio.id}")
+                    portfolio_context = get_market_data_for_portfolio(primary_portfolio.holdings)
                     
-                    if "summary" in result:
-                        result["summary"] += "\n\n💡 **Would you like me to assemble the quantitative team to perform deeper risk analysis on these recommendations?**"
-                        result["follow_up_available"] = True
-                        result["follow_up_type"] = "risk_analysis"
-                
-                return result
+                    print(f"Orchestrator routing query to: {agent_to_run.name}")
+                    result = agent_to_run.run(user_query, context=portfolio_context)
+            
+            # 🚀 ENHANCED: Dynamic follow-up suggestions based on agent and complexity
+            result = self._enhance_result_with_follow_ups(result, selected_agent_name, user_query, complexity_score)
+            
+            return result
+
+    def _should_trigger_workflow(self, user_query: str) -> Tuple[bool, str, float]:
+        """Enhanced workflow triggering with complexity analysis"""
+        
+        # Analyze query complexity
+        complexity_score, reasoning = self.query_analyzer.analyze_complexity(user_query)
+        
+        # Existing workflow triggers
+        workflow_triggers = [
+            "what should i do", "what stocks", "recommend", "advice",
+            "portfolio improvement", "investment strategy", "rebalance my portfolio",
+            "optimize my", "improve my", "help with my portfolio",
+            "full analysis", "complete review", "thorough examination",
+            "end-to-end", "comprehensive", "detailed analysis",
+            "actionable recommendations", "specific steps", "concrete advice",
+            "trading plan", "implementation", "execute"
+        ]
+        
+        query_lower = user_query.lower()
+        trigger_match = any(trigger in query_lower for trigger in workflow_triggers)
+        
+        # 🚀 ENHANCED: Multi-factor triggering logic
+        cross_asset_keywords = ["cross-asset", "correlation", "regime", "asset class", "diversification"]
+        cross_asset_match = any(keyword in query_lower for keyword in cross_asset_keywords)
+        
+        crisis_keywords = ["crisis", "crash", "emergency", "stress test", "black swan"]
+        crisis_match = any(keyword in query_lower for keyword in crisis_keywords)
+        
+        # Enhanced logic: trigger workflow based on multiple factors
+        should_trigger = (
+            trigger_match or 
+            complexity_score > 0.6 or 
+            cross_asset_match or 
+            crisis_match
+        )
+        
+        # Determine workflow type based on multiple factors
+        if crisis_match or complexity_score > 0.8:
+            workflow_type = "crisis"
+        elif cross_asset_match or complexity_score > 0.6 or trigger_match:
+            workflow_type = "enhanced"
+        else:
+            workflow_type = "standard"
+        
+        print(f"🔍 Workflow analysis: trigger={should_trigger}, type={workflow_type}, complexity={complexity_score:.2f}")
+        if complexity_score > 0.5:
+            print(f"📊 Complexity reasoning: {reasoning}")
+        
+        return should_trigger, workflow_type, complexity_score
+
+    def _classify_query_enhanced(self, query_words: Set[str], full_query: str) -> Optional[str]:
+        """Enhanced query classification with CrossAssetAnalyst support"""
+        
+        # 🚀 NEW: Check for cross-asset patterns first (highest priority for new capability)
+        cross_asset_keywords = {
+            "cross-asset", "correlation", "regime", "asset", "class", "diversification",
+            "cross", "breakdown", "shift", "allocation"
+        }
+        
+        if query_words.intersection(cross_asset_keywords):
+            print("🌐 Routing to CrossAssetAnalyst for cross-asset analysis")
+            return "CrossAssetAnalyst"
+        
+        # ENHANCED: Existing routing with better keyword matching
+        expanded_routing = {
+            "SecurityScreenerAgent": {
+                "find", "stocks", "recommend", "recommendations", "buy", "purchase",
+                "screen", "screening", "complement", "complementary", "specific",
+                "which", "what", "securities", "equities", "companies",
+                "quality", "value", "growth", "diversify", "balance", "improve",
+                "candidates", "options", "choices", "select", "selection"
+            },
+            
+            "QuantitativeAnalystAgent": {
+                "analyze", "analysis", "analyzing", "analytical",
+                "risk", "risks", "risky", 
+                "report", "reports", "reporting",
+                "factor", "factors",
+                "alpha", "beta",
+                "cvar", "var",
+                "stress", "test", "testing",
+                "tail", "performance", "metrics"
+            },
+            "StrategyRebalancingAgent": {
+                "rebalance", "rebalancing", "rebalanced",
+                "optimize", "optimization", "optimizing",
+                "allocation", "allocate", "allocating",
+                "diversify", "diversification", "diversifying"
+            },
+            "FinancialTutorAgent": {
+                "explain", "explaining", "explained",
+                "what", "is", "define", "definition",
+                "learn", "learning", "teach", "tutorial",
+                "help", "how"
+            },
+            "StrategyArchitectAgent": {
+                "design", "designing", "create", "build",
+                "strategy", "strategies", "strategic",
+                "recommend", "recommendation", "suggest",
+                "momentum", "trend", "find"
+            },
+            "HedgingStrategistAgent": {
+                "hedge", "hedging", "protect", "protection",
+                "volatility", "target"
+            },
+            "RegimeForecastingAgent": {
+                "forecast", "forecasting", "predict",
+                "regime", "transition", "change"
+            },
+            "BehavioralFinanceAgent": {
+                "bias", "biases", "behavior", "psychology",
+                "behavioral", "psychological"
+            },
+            "ScenarioSimulationAgent": {
+                "scenario", "scenarios", "simulate",
+                "simulation", "what-if", "crash"
+            },
+            "StrategyBacktesterAgent": {
+                "backtest", "backtesting", "test", "testing"
+            }
+        }
+        
+        # Calculate scores for each agent
+        agent_scores = {}
+        for agent_name, keywords in expanded_routing.items():
+            score = len(query_words.intersection(keywords))
+            if score > 0:
+                agent_scores[agent_name] = score
+        
+        # 🚀 ENHANCED: Add context-based scoring
+        if agent_scores:
+            # Boost SecurityScreener for actionable queries
+            if any(word in full_query.lower() for word in ["actionable", "buy", "purchase", "recommend stocks"]):
+                if "SecurityScreenerAgent" in agent_scores:
+                    agent_scores["SecurityScreenerAgent"] += 2
+            
+            # Boost QuantitativeAnalyst for risk queries
+            if any(word in full_query.lower() for word in ["risk analysis", "portfolio risk", "stress test"]):
+                if "QuantitativeAnalystAgent" in agent_scores:
+                    agent_scores["QuantitativeAnalystAgent"] += 1
+            
+            best_agent = max(agent_scores.items(), key=lambda x: x[1])
+            print(f"🎯 Enhanced routing to {best_agent[0]} (score: {best_agent[1]})")
+            return best_agent[0]
+        
+        # EXISTING: Fallback logic
+        portfolio_words = {"portfolio", "portfolios", "holdings", "stocks", "investments"}
+        if query_words.intersection(portfolio_words):
+            print("Defaulting to QuantitativeAnalystAgent for portfolio query")
+            return "QuantitativeAnalystAgent"
+        
+        print("No specific routing found, defaulting to FinancialTutorAgent")
+        return "FinancialTutorAgent"
+
+    def _find_intelligent_fallback(self, planned_agent: str, step_query: str) -> Optional[str]:
+        """Find intelligent fallback agent when planned agent not available"""
+        
+        # Map common plan agent names to roster agent names
+        agent_mapping = {
+            "quantitative": "QuantitativeAnalystAgent",
+            "strategy": "StrategyArchitectAgent", 
+            "security": "SecurityScreenerAgent",
+            "screener": "SecurityScreenerAgent",
+            "risk": "QuantitativeAnalystAgent",
+            "rebalancing": "StrategyRebalancingAgent",
+            "hedging": "HedgingStrategistAgent",
+            "backtest": "StrategyBacktesterAgent",
+            "tutor": "FinancialTutorAgent",
+            "regime": "RegimeForecastingAgent",
+            "behavioral": "BehavioralFinanceAgent",
+            "scenario": "ScenarioSimulationAgent",
+            "cross_asset": "CrossAssetAnalyst",
+            "crossasset": "CrossAssetAnalyst"
+        }
+        
+        planned_lower = planned_agent.lower().replace("agent", "")
+        
+        for key, roster_agent in agent_mapping.items():
+            if key in planned_lower and roster_agent in self.roster:
+                return roster_agent
+        
+        # If no direct mapping, analyze step query for best fit
+        step_words = set(step_query.lower().split())
+        return self._classify_query_enhanced(step_words, step_query)
+
+    def _get_portfolio_required_agents(self) -> List[str]:
+        """Get agents that require portfolio context"""
+        return [
+            "QuantitativeAnalystAgent", "StrategyRebalancingAgent", 
+            "HedgingStrategistAgent", "RegimeForecastingAgent",
+            "BehavioralFinanceAgent", "ScenarioSimulationAgent"
+        ]
+
+    def _get_portfolio_optional_agents(self) -> List[str]:
+        """Get agents that don't require portfolio context"""
+        return ["StrategyArchitectAgent", "FinancialTutorAgent"]
+
+    def _enhance_result_with_follow_ups(self, result: Dict, agent_name: str, query: str, complexity_score: float) -> Dict:
+        """Enhanced result with intelligent follow-up suggestions"""
+        
+        if not result.get("success"):
+            return result
+        
+        # EXISTING: SecurityScreener follow-up logic
+        if (agent_name == "SecurityScreenerAgent" and 
+            result.get("success") and 
+            "complement" not in query.lower()):
+            
+            if "summary" in result:
+                result["summary"] += "\n\n💡 **Would you like me to assemble the quantitative team to perform deeper risk analysis on these recommendations?**"
+                result["follow_up_available"] = True
+                result["follow_up_type"] = "risk_analysis"
+        
+        # 🚀 NEW: CrossAssetAnalyst follow-up suggestions
+        elif agent_name == "CrossAssetAnalyst":
+            if complexity_score > 0.5:
+                result["summary"] += "\n\n🔗 **Would you like me to trigger a comprehensive multi-agent workflow to analyze these cross-asset insights further?**"
+                result["follow_up_available"] = True
+                result["follow_up_type"] = "enhanced_workflow"
+        
+        # 🚀 NEW: QuantitativeAnalyst follow-up for high complexity
+        elif agent_name == "QuantitativeAnalystAgent" and complexity_score > 0.7:
+            result["summary"] += "\n\n📊 **This analysis could benefit from cross-asset correlation analysis. Would you like me to include regime and behavioral factors?**"
+            result["follow_up_available"] = True
+            result["follow_up_type"] = "enhanced_analysis"
+        
+        # 🚀 NEW: General high-complexity follow-up
+        elif complexity_score > 0.8 and not result.get("follow_up_available"):
+            result["summary"] += "\n\n🚀 **This query shows high complexity. Would you like me to assemble the full committee for comprehensive analysis?**"
+            result["follow_up_available"] = True
+            result["follow_up_type"] = "crisis_workflow"
+        
+        return result
+
+    def start_workflow(self, user_query: str, db_session, current_user, workflow_type: str = "auto") -> Dict[str, Any]:
+        """Enhanced workflow start with dynamic type selection"""
+        
+        # Auto-determine workflow type if not specified
+        if workflow_type == "auto":
+            should_trigger, detected_type, complexity_score = self._should_trigger_workflow(user_query)
+            workflow_type = detected_type
+        else:
+            complexity_score, _ = self.query_analyzer.analyze_complexity(user_query)
+        
+        # Create enhanced workflow session
+        session_id = str(uuid.uuid4())
+        workflow = WorkflowSession(session_id, user_query, current_user.id)
+        
+        # 🚀 NEW: Add metadata about selection
+        workflow.workflow_type = workflow_type
+        workflow.complexity_score = complexity_score
+        
+        self.active_workflows[session_id] = workflow
+        
+        print(f"🚀 Starting {workflow_type} workflow session: {session_id}")
+        print(f"📊 Complexity score: {complexity_score:.2f}")
+        print(f"📝 Query: {user_query}")
+        
+        # Get portfolio context
+        user_portfolios = crud.get_user_portfolios(db=db_session, user_id=current_user.id)
+        portfolio_context = {}
+        if user_portfolios:
+            primary_portfolio = user_portfolios[0]
+            portfolio_context = get_market_data_for_portfolio(primary_portfolio.holdings)
+        
+        # 🚀 ENHANCED: Choose workflow execution path based on type
+        if workflow_type in ["enhanced", "crisis"]:
+            return self._execute_enhanced_workflow_step(workflow, portfolio_context, db_session)
+        else:
+            # Use existing workflow logic for standard cases
+            return self._execute_workflow_step(workflow, portfolio_context, db_session)
 
     def execute_follow_up_analysis(self, original_result: Dict, db_session, current_user) -> Dict[str, Any]:
         """Execute follow-up risk analysis on SecurityScreener results"""

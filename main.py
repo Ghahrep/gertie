@@ -15,6 +15,10 @@ from db import crud
 from api.schemas import User
 from core.data_handler import get_market_data_for_portfolio
 from api.routes import alerts
+from api.routes import smart_suggestions
+from api.routes import contextual_chat
+from api import chat_dashboard_integration
+
 
 # --- API Application Setup ---
 app = FastAPI(
@@ -64,6 +68,9 @@ app.include_router(users.router, prefix="/api/v1")
 app.include_router(auth.router, prefix="/api/v1")
 app.include_router(portfolios.router, prefix="/api/v1")
 app.include_router(alerts.router, prefix="/api/v1", tags=["alerts"])
+app.include_router(smart_suggestions.router, prefix="/api/v1", tags=["smart_suggestions"])
+app.include_router(contextual_chat.router, prefix="/api/v1")
+app.include_router(chat_dashboard_integration.router, prefix="/api/v1")
 
 # Create a single, long-lived instance of the enhanced orchestrator
 orchestrator = FinancialOrchestrator()

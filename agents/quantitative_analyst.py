@@ -57,7 +57,7 @@ class QuantitativeAnalystAgent(MCPBaseAgent):
         return "Performs comprehensive quantitative risk analysis, portfolio optimization, and statistical modeling with expertise in tail risk assessment and factor analysis"
 
     # 🚀 CRITICAL FIX: Add run() method for orchestrator compatibility
-    def run(self, user_query: str, context: Optional[Dict] = None) -> Dict[str, Any]:
+    async def run(self, user_query: str, context: Optional[Dict] = None) -> Dict[str, Any]:
         """
         Main entry point for orchestrator compatibility
         Wraps the MCP execute_capability method
@@ -77,9 +77,8 @@ class QuantitativeAnalystAgent(MCPBaseAgent):
                 "portfolio_data": context
             }
             
-            # Execute using MCP framework
-            import asyncio
-            result = asyncio.run(self.execute_capability(capability, data, context))
+            # 🚀 FIXED: Use await instead of asyncio.run()
+            result = await self.execute_capability(capability, data, context)
             
             # Format result for orchestrator
             if result.get("error"):
@@ -99,7 +98,6 @@ class QuantitativeAnalystAgent(MCPBaseAgent):
                 "error": f"Analysis failed: {str(e)}",
                 "agent_used": self.name
             }
-
     def _determine_capability_from_query(self, query: str) -> str:
         """Determine which capability to use based on query content"""
         query_lower = query.lower()
