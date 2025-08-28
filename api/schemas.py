@@ -395,3 +395,40 @@ class AnalysisJobSummary(BaseModel):
     started_at: str = Field(..., description="Job start time")
     completed_at: Optional[str] = Field(None, description="Job completion time")
     agents_used: List[str] = Field(..., description="Agents that participated")
+
+
+class QueryRequest(BaseModel):
+    query: str
+    context: Optional[Dict[str, Any]] = None
+    preferences: Optional[Dict[str, Any]] = None
+
+class WorkflowResponse(BaseModel):
+    session_id: str
+    status: str  # "success", "error", "processing"
+    execution_mode: Optional[str] = None
+    execution_time_ms: Optional[int] = None
+    result: Optional[Dict[str, Any]] = None
+    error_message: Optional[str] = None
+    reasoning: Optional[str] = None
+
+class WorkflowStatus(BaseModel):
+    session_id: str
+    state: str
+    progress: Optional[float] = None
+    current_step: Optional[int] = None
+    steps_completed: Optional[List[str]] = None
+    estimated_completion_time: Optional[int] = None
+
+class PerformanceMetrics(BaseModel):
+    total_executions: int
+    success_rate: float
+    average_execution_time_ms: float
+    average_confidence_score: float
+    period_days: int
+
+
+class BaseResponse(BaseModel):
+    """Base response schema"""
+    success: bool = True
+    message: Optional[str] = None
+    timestamp: datetime = Field(default_factory=datetime.now)

@@ -1,0 +1,89 @@
+# mcp/agent_communication.py
+"""
+Minimal Agent Communication Layer
+=================================
+Simplified version that doesn't depend on complex schemas.
+"""
+
+import asyncio
+import logging
+from typing import Dict, List, Any, Optional
+from datetime import datetime
+from enum import Enum
+
+logger = logging.getLogger(__name__)
+
+class MessageType(Enum):
+    POSITION = "position"
+    CHALLENGE = "challenge"
+    RESPONSE = "response"
+    EVIDENCE = "evidence"
+    CONSENSUS_CHECK = "consensus_check"
+    FINAL_STATEMENT = "final_statement"
+
+class DebateCommunicationHub:
+    """Minimal communication hub for debates"""
+    
+    def __init__(self):
+        self.active_debates: Dict[str, Dict] = {}
+        self.message_handlers: Dict = {}
+    
+    async def start_debate_session(self, debate_id: str, participants: List[str], moderator_config: Dict = None):
+        """Start a basic debate session"""
+        self.active_debates[debate_id] = {
+            "debate_id": debate_id,
+            "participants": participants,
+            "status": "active",
+            "created_at": datetime.now(),
+            "message_history": [],
+            "current_stage": "position_formation",
+            "current_round": 1
+        }
+        
+        logger.info(f"Started debate session {debate_id} with {len(participants)} participants")
+        return self.active_debates[debate_id]
+    
+    async def end_debate_session(self, debate_id: str):
+        """End debate session"""
+        if debate_id in self.active_debates:
+            del self.active_debates[debate_id]
+            logger.info(f"Ended debate session {debate_id}")
+    
+    def register_message_handler(self, message_type: MessageType, handler):
+        """Register a message handler"""
+        if message_type not in self.message_handlers:
+            self.message_handlers[message_type] = []
+        self.message_handlers[message_type].append(handler)
+    
+    async def route_message(self, message: Dict):
+        """Route a message to handlers"""
+        try:
+            # Basic message routing
+            debate_id = message.get("debate_id")
+            if debate_id in self.active_debates:
+                self.active_debates[debate_id]["message_history"].append(message)
+                logger.debug(f"Routed message in debate {debate_id}")
+        except Exception as e:
+            logger.error(f"Error routing message: {e}")
+
+class MCPDebateIntegration:
+    """Minimal MCP integration"""
+    
+    def __init__(self, mcp_client):
+        self.mcp_client = mcp_client
+    
+    async def get_debate_results(self, debate_id: str) -> Dict:
+        """Get basic debate results"""
+        if debate_id in debate_communication_hub.active_debates:
+            session = debate_communication_hub.active_debates[debate_id]
+            return {
+                "debate_id": debate_id,
+                "participants": session["participants"],
+                "message_count": len(session["message_history"]),
+                "status": session["status"],
+                "stage": session["current_stage"]
+            }
+        return {"error": "Debate not found"}
+
+# Global instance
+debate_communication_hub = DebateCommunicationHub()

@@ -13,7 +13,8 @@ class JobStatus(str, Enum):
     CANCELLED = "cancelled"
 
 class AgentCapability(str, Enum):
-    """Enumeration of available agent capabilities"""
+    """Enhanced enumeration of available agent capabilities including debate"""
+    # Existing capabilities
     RISK_ANALYSIS = "risk_analysis"
     PORTFOLIO_ANALYSIS = "portfolio_analysis"
     TAX_OPTIMIZATION = "tax_optimization"
@@ -27,6 +28,15 @@ class AgentCapability(str, Enum):
     PORTFOLIO_DATA_FETCH = "portfolio_data_fetch"
     MARKET_DATA_FETCH = "market_data_fetch"
     GENERAL_ANALYSIS = "general_analysis"
+    
+    # New debate capabilities
+    DEBATE_PARTICIPATION = "debate_participation"
+    CONSENSUS_BUILDING = "consensus_building"
+    COLLABORATIVE_ANALYSIS = "collaborative_analysis"
+    MULTI_AGENT_COORDINATION = "multi_agent_coordination"
+    EVIDENCE_EVALUATION = "evidence_evaluation"
+    POSITION_SYNTHESIS = "position_synthesis"
+    CONFLICT_RESOLUTION = "conflict_resolution"
 
 class AgentRegistration(BaseModel):
     """Schema for agent registration with the MCP"""
@@ -244,7 +254,175 @@ class DebateResponse(BaseModel):
     consensus_reached: bool = Field(..., description="Whether consensus was achieved")
     final_recommendation: Optional[Dict[str, Any]] = Field(None, description="Final consensus recommendation")
     confidence_score: Optional[float] = Field(None, description="Overall confidence in the consensus")
+
+class DebateJobType(str, Enum):
+    """Debate-specific job types for MCP"""
+    CREATE_DEBATE = "create_debate"
+    JOIN_DEBATE = "join_debate"
+    SUBMIT_POSITION = "submit_position"
+    VOTE_CONSENSUS = "vote_consensus"
+    GET_DEBATE_STATUS = "get_debate_status"
+    FINALIZE_DEBATE = "finalize_debate"
+
+class DebateJobRequest(BaseModel):
+    """Schema for debate job requests"""
+    job_type: DebateJobType = Field(..., description="Type of debate operation")
+    debate_id: Optional[str] = Field(None, description="Existing debate ID (for join/update operations)")
+    topic: Optional[str] = Field(None, description="Debate topic (for create operations)")
+    description: Optional[str] = Field(None, description="Debate description")
+    preferred_agents: List[str] = Field(default_factory=list, description="Agent IDs to include")
+    urgency: str = Field(default="medium", description="Urgency level")
+    max_rounds: int = Field(default=3, description="Maximum debate rounds")
+    position_data: Optional[Dict[str, Any]] = Field(None, description="Agent position data")
+    evidence: Optional[List[Dict[str, Any]]] = Field(None, description="Supporting evidence")
+    vote_data: Optional[Dict[str, Any]] = Field(None, description="Consensus vote data")
+    timeout_seconds: int = Field(default=900, description="Debate timeout")
     
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "job_type": "create_debate",
+                "topic": "Should we reduce portfolio risk given current volatility?",
+                "preferred_agents": ["quantitative_analyst", "risk_assessor"],
+                "urgency": "high",
+                "max_rounds": 3,
+                "timeout_seconds": 600
+            }
+        }
+
+class DebateJobResponse(BaseModel):
+    """Schema for debate job responses"""
+    job_id: str = Field(..., description="MCP job identifier")
+    debate_id: str = Field(..., description="Debate identifier")
+    status: JobStatus = Field(..., description="Current job status")
+    message: str = Field(..., description="Status message")
+    participating_agents: List[str] = Field(default_factory=list, description="Agents in debate")
+    current_stage: Optional[str] = Field(None, description="Current debate stage")
+    current_round: int = Field(default=1, description="Current round number")
+    progress: Optional[float] = Field(None, description="Debate progress percentage")
+    result: Optional[Dict[str, Any]] = Field(None, description="Debate results when completed")
+    consensus_items: Optional[List[Dict[str, Any]]] = Field(None, description="Consensus items")
+    estimated_completion: Optional[str] = Field(None, description="Estimated completion time")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "job_id": "job_debate_123",
+                "debate_id": "debate_456",
+                "status": "running",
+                "message": "Debate in progress - position formation stage",
+                "participating_agents": ["quantitative_analyst", "risk_assessor"],
+                "current_stage": "position_formation",
+                "current_round": 1,
+                "progress": 25.0
+            }
+        }
+
+class AgentDebateParticipation(BaseModel):
+    """Schema for agent debate participation requests"""
+    debate_id: str = Field(..., description="Debate ID to participate in")
+    agent_id: str = Field(..., description="Agent ID")
+    debate_topic: str = Field(..., description="Topic of the debate")
+    current_stage: str = Field(..., description="Current debate stage")
+    existing_positions: List[Dict[str, Any]] = Field(default_factory=list, description="Previous positions")
+    context: Dict[str, Any] = Field(default_factory=dict, description="Additional context")
+    max_response_time_seconds: int = Field(default=60, description="Response time limit")
+
+class AgentDebateResponse(BaseModel):
+    """Schema for agent debate responses"""
+    agent_id: str = Field(..., description="Responding agent ID")
+    position: str = Field(..., description="Agent's position on the topic")
+    confidence_score: float = Field(..., ge=0.0, le=1.0, description="Confidence in position")
+    evidence: List[Dict[str, Any]] = Field(default_factory=list, description="Supporting evidence")
+    reasoning: str = Field(..., description="Detailed reasoning")
+    challenges_to_other_positions: Optional[List[Dict[str, Any]]] = Field(None, description="Challenges to other agents")
+    consensus_vote: Optional[str] = Field(None, description="Vote on consensus items")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Additional metadata")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "agent_id": "quantitative_analyst_001",
+                "position": "Portfolio risk should be reduced given current market volatility indicators",
+                "confidence_score": 0.85,
+                "evidence": [
+                    {
+                        "type": "metric",
+                        "value": "VIX at 28.5, above 25 threshold",
+                        "source": "market_data"
+                    }
+                ],
+                "reasoning": "Current volatility metrics exceed our risk thresholds...",
+                "consensus_vote": "support"
+            }
+        }
+
+class DebateStatusUpdate(BaseModel):
+    """Schema for debate status updates"""
+    debate_id: str = Field(..., description="Debate ID")
+    status: str = Field(..., description="New status")
+    stage: Optional[str] = Field(None, description="Current stage")
+    round_number: Optional[int] = Field(None, description="Current round")
+    participants_ready: int = Field(default=0, description="Number of ready participants")
+    messages_count: int = Field(default=0, description="Total messages")
+    consensus_items_count: int = Field(default=0, description="Consensus items")
+    estimated_completion: Optional[datetime] = Field(None, description="Estimated completion")
+
+class DebateMetrics(BaseModel):
+    """Schema for debate performance metrics"""
+    debate_id: str = Field(..., description="Debate ID")
+    total_duration_seconds: Optional[int] = Field(None, description="Total debate duration")
+    participants_count: int = Field(..., description="Number of participants")
+    messages_count: int = Field(..., description="Total messages exchanged")
+    consensus_items_count: int = Field(..., description="Consensus items generated")
+    consensus_agreement_rate: float = Field(..., description="Percentage of consensus agreement")
+    quality_score: float = Field(..., ge=0.0, le=1.0, description="Overall debate quality")
+    participant_satisfaction: Optional[float] = Field(None, description="Average participant satisfaction")
+    implementation_likelihood: Optional[float] = Field(None, description="Likelihood of implementation")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "debate_id": "debate_456",
+                "total_duration_seconds": 450,
+                "participants_count": 3,
+                "messages_count": 12,
+                "consensus_items_count": 4,
+                "consensus_agreement_rate": 75.0,
+                "quality_score": 0.82,
+                "participant_satisfaction": 0.78,
+                "implementation_likelihood": 0.85
+            }
+        }
+        
+class DebateTemplate(BaseModel):
+    """Schema for debate templates"""
+    template_id: str = Field(..., description="Template identifier")
+    name: str = Field(..., description="Template name")
+    category: str = Field(..., description="Template category")
+    description: str = Field(..., description="Template description")
+    recommended_agents: List[str] = Field(..., description="Recommended agent types")
+    default_rounds: int = Field(default=3, description="Default number of rounds")
+    urgency_level: str = Field(default="medium", description="Default urgency")
+    query_template: str = Field(..., description="Query template with placeholders")
+    required_parameters: List[str] = Field(default_factory=list, description="Required parameters")
+    optional_parameters: List[str] = Field(default_factory=list, description="Optional parameters")
+    success_rate: Optional[float] = Field(None, description="Historical success rate")
+    average_duration_minutes: Optional[float] = Field(None, description="Average completion time")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "template_id": "portfolio_risk_debate",
+                "name": "Portfolio Risk Assessment Debate",
+                "category": "risk_management",
+                "description": "Multi-agent debate for portfolio risk decisions",
+                "recommended_agents": ["quantitative_analyst", "risk_assessor", "portfolio_manager"],
+                "query_template": "Should we {action} portfolio risk given {market_conditions}?",
+                "required_parameters": ["action", "market_conditions"],
+                "success_rate": 0.87
+            }
+        }
 class SystemMetrics(BaseModel):
     """Schema for system performance metrics"""
     timestamp: datetime = Field(..., description="Metrics collection timestamp")

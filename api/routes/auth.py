@@ -2,6 +2,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
+from fastapi import WebSocket, WebSocketException, status
 from typing import Annotated
 
 from api import schemas
@@ -13,6 +14,9 @@ from core.config import settings
 
 router = APIRouter()
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/v1/auth/token")
+
+SECRET_KEY = settings.SECRET_KEY
+ALGORITHM = settings.ALGORITHM
 
 @router.post("/auth/token", response_model=schemas.Token, tags=["Authentication"])
 def login_for_access_token(form_data: Annotated[OAuth2PasswordRequestForm, Depends()], db: Session = Depends(get_db)):
@@ -43,3 +47,31 @@ def get_current_user(token: Annotated[str, Depends(oauth2_scheme)], db: Session 
     if user is None:
         raise credentials_exception
     return user
+async def get_current_user_websocket(token: str = None):
+    """
+    WebSocket version of user authentication
+    Returns user if token is valid, None otherwise
+    """
+    if not token:
+        return None
+    
+    try:
+        # Use the same logic as your regular auth
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        if username is None:
+            return None
+        
+        # Get user from database (adapt this to your user lookup logic)
+        from db.session import get_db
+        from db import crud
+        
+        db = next(get_db())
+        try:
+            user = crud.get_user_by_email(db, username)
+            return user
+        finally:
+            db.close()
+            
+    except JWTError:
+        return None

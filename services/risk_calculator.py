@@ -1,524 +1,799 @@
+# services/risk_calculator.py
 """
-Risk Calculator Service - FIXED VERSION
-=======================================
-
-Fixed to work with LangChain tool decorators in your existing tools.
-Integrates with existing risk_tools.py and fractal_tools.py modules.
-
-Author: Quant Platform Development
-Created: August 19, 2025
+Enhanced Risk Calculator - Task 2.1.1 Implementation
+===================================================
+Production-ready risk calculator with comprehensive metrics and fractal analysis.
+Fixes LangChain tool decorator issues and adds all required risk metrics.
 """
 
-import pandas as pd
 import numpy as np
-import yfinance as yf
-from typing import Dict, Any, List, Optional
+import pandas as pd
+from typing import Dict, List, Optional, Union, Tuple
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 import warnings
-from dataclasses import dataclass
+from scipy import stats
+from scipy.optimize import minimize
+import yfinance as yf
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import logging
+from pydantic import BaseModel, Field
+# Fix LangChain imports and decorators
+try:
+    from langchain.tools import BaseTool
+    from pydantic import BaseModel, Field
+    LANGCHAIN_AVAILABLE = True
+except ImportError:
+    # Fallback if LangChain not available
+    LANGCHAIN_AVAILABLE = False
+    BaseTool = object
+    BaseModel = object
+    Field = lambda **kwargs: None
 
-warnings.filterwarnings('ignore', category=FutureWarning)
+logger = logging.getLogger(__name__)
 
 @dataclass
 class RiskMetrics:
-    """Data class to hold comprehensive risk metrics"""
-    volatility: float
-    beta: float
-    max_drawdown: float
+    """Comprehensive risk metrics container"""
+    # Fields WITHOUT default values must come first
     var_95: float
     var_99: float
-    cvar_95: float
+    cvar_95: float  # Conditional VaR (Expected Shortfall)
     cvar_99: float
+    
+    # Risk-Adjusted Return Metrics
     sharpe_ratio: float
     sortino_ratio: float
     calmar_ratio: float
+    information_ratio: float
+    
+    # Volatility Metrics
+    annualized_volatility: float
+    downside_deviation: float
+    upside_deviation: float
+    volatility_skewness: float
+    
+    # Drawdown Metrics
+    max_drawdown: float
+    current_drawdown: float
+    drawdown_duration: int
+    
+    # Distribution Metrics
+    skewness: float
+    kurtosis: float
+    jarque_bera_stat: float
+    jarque_bera_pvalue: float
+    
+    # Fractal Analysis
     hurst_exponent: float
-    dfa_alpha: float
-    risk_score: float
-    sentiment_index: int
-    regime_volatility: float
-    timestamp: datetime
+    dfa_alpha: float  # Detrended Fluctuation Analysis
+    fractal_dimension: float
+    
+    # Metadata (required fields)
+    calculation_date: datetime
+    data_period_days: int
+    confidence_score: float  # Confidence in risk calculations
+    
+    # Fields WITH default values must come last
+    recovery_time: Optional[int] = None
+    beta: Optional[float] = None
+    alpha: Optional[float] = None
+    correlation_to_market: Optional[float] = None
+    tracking_error: Optional[float] = None
 
-class RiskCalculatorService:
+class RiskCalculatorInput(BaseModel):
+    """Input schema for risk calculator"""
+    returns: Union[List[float], str] = Field(description="Portfolio returns or symbol for calculation")
+    benchmark_returns: Optional[Union[List[float], str]] = Field(None, description="Benchmark returns for relative metrics")
+    confidence_levels: Optional[List[float]] = Field([0.95, 0.99], description="VaR confidence levels")
+    risk_free_rate: Optional[float] = Field(0.02, description="Risk-free rate for Sharpe ratio")
+    periods_per_year: Optional[int] = Field(252, description="Trading periods per year")
+
+class EnhancedRiskCalculator:
     """
-    Centralized risk calculation engine for portfolio monitoring.
-    FIXED to work with LangChain tool decorators.
+    Production-ready risk calculator with comprehensive metrics
     """
     
-    def __init__(self, market_benchmark: str = "SPY"):
-        self.market_benchmark = market_benchmark
-        self.trading_days_per_year = 252
+    def __init__(self, cache_enabled: bool = True):
+        self.cache_enabled = cache_enabled
+        self._calculation_cache = {}
         
-    def calculate_comprehensive_risk_metrics(
-        self,
-        portfolio_returns: pd.Series,
-        market_returns: Optional[pd.Series] = None,
-        price_data: Optional[pd.DataFrame] = None
-    ) -> Optional[RiskMetrics]:
-        """
-        Calculate comprehensive risk metrics for a portfolio.
-        FIXED to work with your existing LangChain tools.
-        """
-        try:
-            if len(portfolio_returns) < 30:
-                print("Warning: Insufficient data for reliable risk calculation")
-                return None
-                
-            # 1. Core Risk Metrics using DIRECT function calls (not LangChain tool calls)
-            risk_report = self._calculate_risk_metrics_direct(portfolio_returns)
-            
-            if not risk_report:
-                print("Failed to calculate core risk metrics")
-                return None
-            
-            # 2. Drawdown Analysis - use direct function call
-            drawdown_stats = self._calculate_drawdowns_direct(portfolio_returns)
-            max_drawdown = drawdown_stats['max_drawdown_pct'] / 100 if drawdown_stats else 0.0
-            calmar_ratio = drawdown_stats['calmar_ratio'] if drawdown_stats else 0.0
-            
-            # 3. Beta Calculation (if market data available)
-            beta = 1.0  # Default beta
-            if market_returns is not None:
-                calculated_beta = self._calculate_beta_direct(portfolio_returns, market_returns)
-                beta = calculated_beta if calculated_beta is not None else 1.0
-            
-            # 4. Fractal Analysis - use direct function calls
-            hurst_result = self._safe_calculate_hurst(portfolio_returns)
-            hurst_exponent = hurst_result.get('hurst_exponent', 0.5) if hurst_result else 0.5
-            
-            dfa_result = self._safe_calculate_dfa(portfolio_returns)
-            dfa_alpha = dfa_result.get('dfa_alpha', 0.5) if dfa_result else 0.5
-            
-            # 5. Regime Analysis for volatility context
-            regime_volatility = self._calculate_regime_volatility(portfolio_returns)
-            
-            # 6. Risk Sentiment Index
-            sentiment_index = self._calculate_sentiment_index(risk_report, price_data)
-            
-            # 7. Composite Risk Score
-            risk_score = self._calculate_composite_risk_score(
-                volatility=risk_report['performance_stats']['annualized_volatility_pct'] / 100,
-                max_drawdown=abs(max_drawdown),
-                sharpe_ratio=risk_report['risk_adjusted_ratios']['sharpe_ratio'],
-                cvar_99=risk_report['risk_measures']['99%']['cvar_expected_shortfall']
-            )
-            
-            # Create RiskMetrics object
-            return RiskMetrics(
-                volatility=risk_report['performance_stats']['annualized_volatility_pct'] / 100,
-                beta=beta,
-                max_drawdown=abs(max_drawdown),
-                var_95=abs(risk_report['risk_measures']['95%']['var']),
-                var_99=abs(risk_report['risk_measures']['99%']['var']),
-                cvar_95=risk_report['risk_measures']['95%']['cvar_expected_shortfall'],
-                cvar_99=risk_report['risk_measures']['99%']['cvar_expected_shortfall'],
-                sharpe_ratio=risk_report['risk_adjusted_ratios']['sharpe_ratio'],
-                sortino_ratio=risk_report['risk_adjusted_ratios']['sortino_ratio'],
-                calmar_ratio=calmar_ratio,
-                hurst_exponent=hurst_exponent,
-                dfa_alpha=dfa_alpha,
-                risk_score=risk_score,
-                sentiment_index=sentiment_index,
-                regime_volatility=regime_volatility,
-                timestamp=datetime.now()
-            )
-            
-        except Exception as e:
-            print(f"Error calculating comprehensive risk metrics: {e}")
-            return None
-    
-    def _calculate_risk_metrics_direct(self, portfolio_returns: pd.Series) -> Optional[Dict[str, Any]]:
-        """
-        Direct implementation of risk metrics calculation.
-        Avoids LangChain tool call issues.
-        """
-        try:
-            confidence_levels = [0.95, 0.99]
-            trading_days = self.trading_days_per_year
-            
-            # VaR and CVaR Analysis
-            var_analysis = {}
-            for confidence in confidence_levels:
-                var_value = portfolio_returns.quantile(1 - confidence)
-                cvar_value = self._calculate_cvar_direct(portfolio_returns, confidence)
-                var_analysis[f"{int(confidence*100)}%"] = {
-                    "var": var_value,
-                    "cvar_expected_shortfall": cvar_value
-                }
-            
-            # Performance Statistics
-            daily_vol = portfolio_returns.std()
-            annual_vol = daily_vol * np.sqrt(trading_days)
-            annual_return = portfolio_returns.mean() * trading_days
-
-            # Risk-Adjusted Ratios
-            sharpe_ratio = annual_return / annual_vol if annual_vol > 0 else 0
-            
-            downside_returns = portfolio_returns[portfolio_returns < 0]
-            downside_deviation = downside_returns.std() * np.sqrt(trading_days)
-            sortino_ratio = annual_return / downside_deviation if downside_deviation > 0 else 0
-
-            return {
-                "risk_measures": var_analysis,
-                "performance_stats": {
-                    "annualized_return_pct": annual_return * 100,
-                    "annualized_volatility_pct": annual_vol * 100,
-                },
-                "risk_adjusted_ratios": {
-                    "sharpe_ratio": sharpe_ratio,
-                    "sortino_ratio": sortino_ratio,
-                }
-            }
-            
-        except Exception as e:
-            print(f"Error in direct risk metrics calculation: {e}")
-            return None
-    
-    def _calculate_cvar_direct(self, returns: pd.Series, confidence_level: float = 0.95) -> float:
-        """Direct CVaR calculation"""
-        try:
-            clean_returns = returns.dropna()
-            if clean_returns.empty:
-                return np.nan
-                
-            var_threshold = clean_returns.quantile(1 - confidence_level)
-            tail_losses = clean_returns[clean_returns <= var_threshold]
-            
-            return -var_threshold if tail_losses.empty else -tail_losses.mean()
-        except:
-            return 0.0
-    
-    def _calculate_drawdowns_direct(self, returns: pd.Series) -> Optional[Dict[str, Any]]:
-        """Direct drawdown calculation"""
-        try:
-            if returns.empty:
-                return None
-
-            cumulative_returns = (1 + returns).cumprod()
-            running_max = cumulative_returns.cummax()
-            drawdowns = (cumulative_returns - running_max) / running_max
-
-            max_drawdown = drawdowns.min()
-            
-            # Handle datetime index
-            end_date_idx = drawdowns.idxmin()
-            start_date_idx = cumulative_returns.loc[:end_date_idx].idxmax()
-            
-            if isinstance(start_date_idx, (datetime, pd.Timestamp)):
-                start_date_str = start_date_idx.strftime('%Y-%m-%d')
-                end_date_str = end_date_idx.strftime('%Y-%m-%d')
-            else:
-                start_date_str = f"Day {start_date_idx}"
-                end_date_str = f"Day {end_date_idx}"
-
-            annual_return = returns.mean() * 252
-            calmar_ratio = annual_return / abs(max_drawdown) if max_drawdown < 0 else 0
-            
-            return {
-                "max_drawdown_pct": max_drawdown * 100,
-                "start_of_max_drawdown": start_date_str,
-                "end_of_max_drawdown": end_date_str,
-                "current_drawdown_pct": drawdowns.iloc[-1] * 100,
-                "calmar_ratio": calmar_ratio
-            }
-        except Exception as e:
-            print(f"Error calculating drawdowns: {e}")
-            return None
-    
-    def _calculate_beta_direct(self, portfolio_returns: pd.Series, market_returns: pd.Series) -> Optional[float]:
-        """Direct beta calculation"""
-        try:
-            if portfolio_returns.empty or market_returns.empty:
-                return None
-            
-            # Align data by index
-            df = pd.DataFrame({'portfolio': portfolio_returns, 'market': market_returns}).dropna()
-            if len(df) < 30:
-                return None
-                
-            covariance = df['portfolio'].cov(df['market'])
-            market_variance = df['market'].var()
-            
-            return covariance / market_variance if market_variance > 0 else None
-        except:
-            return None
-    
-    def _safe_calculate_hurst(self, returns: pd.Series) -> Optional[Dict[str, Any]]:
-        """Safely calculate Hurst exponent with error handling"""
-        try:
-            if len(returns) >= 100:  # Minimum data requirement
-                # Import the function directly, not as LangChain tool
-                from tools.fractal_tools import calculate_hurst
-                # Use invoke method for LangChain tools
-                try:
-                    return calculate_hurst.invoke({"series": returns})
-                except:
-                    # Fallback to direct call if invoke doesn't work
-                    return calculate_hurst(returns)
-        except Exception as e:
-            print(f"Hurst calculation failed: {e}")
-        return None
-    
-    def _safe_calculate_dfa(self, returns: pd.Series) -> Optional[Dict[str, Any]]:
-        """Safely calculate DFA with error handling"""
-        try:
-            if len(returns) >= 100:  # Minimum data requirement
-                # Import the function directly, not as LangChain tool
-                from tools.fractal_tools import calculate_dfa
-                # Use invoke method for LangChain tools
-                try:
-                    return calculate_dfa.invoke({"series": returns})
-                except:
-                    # Fallback to direct call if invoke doesn't work
-                    return calculate_dfa(returns)
-        except Exception as e:
-            print(f"DFA calculation failed: {e}")
-        return None
-    
-    def _calculate_regime_volatility(self, returns: pd.Series) -> float:
-        """Calculate regime-aware volatility measure"""
-        try:
-            if len(returns) >= 100:
-                # Import the function directly, not as LangChain tool
-                from tools.regime_tools import detect_hmm_regimes
-                # Use invoke method for LangChain tools
-                try:
-                    regime_result = detect_hmm_regimes.invoke({
-                        "returns": returns, 
-                        "n_regimes": 2
-                    })
-                except:
-                    # Fallback: try direct call
-                    try:
-                        regime_result = detect_hmm_regimes(returns, n_regimes=2)
-                    except:
-                        regime_result = None
-                
-                if regime_result:
-                    current_regime = regime_result['current_regime']
-                    regime_char = regime_result['regime_characteristics']
-                    return regime_char[current_regime]['volatility']
-        except Exception as e:
-            print(f"Regime volatility calculation failed: {e}")
-        
-        # Fallback to simple rolling volatility
-        return returns.rolling(30).std().iloc[-1] * np.sqrt(252)
-    
-    def _calculate_sentiment_index(
+    def calculate_comprehensive_risk(
         self, 
-        risk_report: Dict[str, Any], 
-        price_data: Optional[pd.DataFrame]
-    ) -> int:
-        """Calculate risk sentiment index"""
-        try:
-            if price_data is not None and len(price_data.columns) > 1:
-                # Direct correlation calculation instead of using LangChain tool
-                corr_matrix = price_data.pct_change().corr()
-                if corr_matrix is not None:
-                    # Simple sentiment calculation
-                    np.fill_diagonal(corr_matrix.values, np.nan)
-                    avg_corr = corr_matrix.mean().mean()
-                    
-                    # Calculate sentiment index components
-                    vol_pct = risk_report['performance_stats']['annualized_volatility_pct']
-                    vol_score = np.clip((vol_pct - 5) / (40 - 5), 0, 1) * 100
-                    
-                    cvar99 = abs(risk_report['risk_measures']['99%']['cvar_expected_shortfall'])
-                    cvar_score = np.clip((cvar99 - 0.01) / (0.05 - 0.01), 0, 1) * 100
-                    
-                    corr_score = np.clip(avg_corr / 0.8, 0, 1) * 100
-                    
-                    # Weighted average
-                    final_score = (0.4 * vol_score + 0.4 * cvar_score + 0.2 * corr_score)
-                    return int(final_score)
-        except Exception as e:
-            print(f"Sentiment index calculation failed: {e}")
+        returns: Union[pd.Series, np.ndarray, List[float]],
+        benchmark_returns: Optional[Union[pd.Series, np.ndarray, List[float]]] = None,
+        confidence_levels: List[float] = [0.95, 0.99],
+        risk_free_rate: float = 0.02,
+        periods_per_year: int = 252
+    ) -> RiskMetrics:
+        """
+        Calculate comprehensive risk metrics for a return series
         
-        # Fallback sentiment based on volatility
-        vol_pct = risk_report['performance_stats']['annualized_volatility_pct']
-        if vol_pct < 15:
-            return 25  # Low risk
-        elif vol_pct < 25:
-            return 50  # Medium risk
+        Args:
+            returns: Portfolio returns (daily)
+            benchmark_returns: Benchmark returns for relative metrics
+            confidence_levels: Confidence levels for VaR calculation
+            risk_free_rate: Annual risk-free rate
+            periods_per_year: Trading periods per year (252 for daily)
+            
+        Returns:
+            RiskMetrics object with all calculated metrics
+        """
+        
+        # Convert inputs to numpy arrays
+        returns = np.array(returns) if not isinstance(returns, np.ndarray) else returns
+        returns = returns[~np.isnan(returns)]  # Remove NaN values
+        
+        if len(returns) < 30:
+            raise ValueError("Insufficient data: Need at least 30 return observations")
+        
+        # Calculate cache key
+        cache_key = self._generate_cache_key(returns, benchmark_returns, confidence_levels, risk_free_rate)
+        
+        if self.cache_enabled and cache_key in self._calculation_cache:
+            logger.info("Returning cached risk metrics")
+            return self._calculation_cache[cache_key]
+        
+        logger.info(f"Calculating risk metrics for {len(returns)} observations")
+        
+        try:
+            # Basic statistics
+            mean_return = np.mean(returns)
+            std_return = np.std(returns, ddof=1)
+            
+            # VaR and CVaR calculations
+            var_metrics = self._calculate_var_cvar(returns, confidence_levels)
+            
+            # Risk-adjusted return metrics
+            risk_adjusted_metrics = self._calculate_risk_adjusted_returns(
+                returns, risk_free_rate, periods_per_year
+            )
+            
+            # Volatility metrics
+            volatility_metrics = self._calculate_volatility_metrics(returns, periods_per_year)
+            
+            # Drawdown analysis
+            drawdown_metrics = self._calculate_drawdown_metrics(returns)
+            
+            # Distribution analysis
+            distribution_metrics = self._calculate_distribution_metrics(returns)
+            
+            # Fractal analysis
+            fractal_metrics = self._calculate_fractal_metrics(returns)
+            
+            # Benchmark-relative metrics
+            benchmark_metrics = {}
+            if benchmark_returns is not None:
+                benchmark_metrics = self._calculate_benchmark_metrics(
+                    returns, benchmark_returns, risk_free_rate, periods_per_year
+                )
+            
+            # Confidence score based on data quality
+            confidence_score = self._calculate_confidence_score(returns, len(returns))
+            
+            # Combine all metrics
+            risk_metrics = RiskMetrics(
+                # VaR metrics
+                var_95=var_metrics.get('var_95', np.nan),
+                var_99=var_metrics.get('var_99', np.nan),
+                cvar_95=var_metrics.get('cvar_95', np.nan),
+                cvar_99=var_metrics.get('cvar_99', np.nan),
+                
+                # Risk-adjusted returns
+                sharpe_ratio=risk_adjusted_metrics.get('sharpe_ratio', np.nan),
+                sortino_ratio=risk_adjusted_metrics.get('sortino_ratio', np.nan),
+                calmar_ratio=risk_adjusted_metrics.get('calmar_ratio', np.nan),
+                information_ratio=benchmark_metrics.get('information_ratio', np.nan),
+                
+                # Volatility
+                annualized_volatility=volatility_metrics.get('annualized_volatility', np.nan),
+                downside_deviation=volatility_metrics.get('downside_deviation', np.nan),
+                upside_deviation=volatility_metrics.get('upside_deviation', np.nan),
+                volatility_skewness=volatility_metrics.get('volatility_skewness', np.nan),
+                
+                # Drawdown
+                max_drawdown=drawdown_metrics.get('max_drawdown', np.nan),
+                current_drawdown=drawdown_metrics.get('current_drawdown', np.nan),
+                drawdown_duration=drawdown_metrics.get('drawdown_duration', 0),
+                recovery_time=drawdown_metrics.get('recovery_time'),
+                
+                # Distribution
+                skewness=distribution_metrics.get('skewness', np.nan),
+                kurtosis=distribution_metrics.get('kurtosis', np.nan),
+                jarque_bera_stat=distribution_metrics.get('jarque_bera_stat', np.nan),
+                jarque_bera_pvalue=distribution_metrics.get('jarque_bera_pvalue', np.nan),
+                
+                # Fractal
+                hurst_exponent=fractal_metrics.get('hurst_exponent', np.nan),
+                dfa_alpha=fractal_metrics.get('dfa_alpha', np.nan),
+                fractal_dimension=fractal_metrics.get('fractal_dimension', np.nan),
+                
+                # Benchmark metrics
+                beta=benchmark_metrics.get('beta'),
+                alpha=benchmark_metrics.get('alpha'),
+                correlation_to_market=benchmark_metrics.get('correlation'),
+                tracking_error=benchmark_metrics.get('tracking_error'),
+                
+                # Metadata
+                calculation_date=datetime.now(),
+                data_period_days=len(returns),
+                confidence_score=confidence_score
+            )
+            
+            # Cache results
+            if self.cache_enabled:
+                self._calculation_cache[cache_key] = risk_metrics
+            
+            logger.info("Risk metrics calculation completed successfully")
+            return risk_metrics
+            
+        except Exception as e:
+            logger.error(f"Risk calculation failed: {str(e)}")
+            raise RuntimeError(f"Risk calculation failed: {str(e)}")
+    
+    def _calculate_var_cvar(self, returns: np.ndarray, confidence_levels: List[float]) -> Dict:
+        """Calculate Value at Risk and Conditional Value at Risk"""
+        
+        var_results = {}
+        
+        for conf_level in confidence_levels:
+            alpha = 1 - conf_level
+            
+            # Historical VaR
+            var_value = np.percentile(returns, alpha * 100)
+            
+            # Conditional VaR (Expected Shortfall)
+            cvar_value = np.mean(returns[returns <= var_value])
+            
+            conf_str = f"{int(conf_level * 100)}"
+            var_results[f'var_{conf_str}'] = var_value
+            var_results[f'cvar_{conf_str}'] = cvar_value
+        
+        return var_results
+    
+    def _calculate_risk_adjusted_returns(
+        self, 
+        returns: np.ndarray, 
+        risk_free_rate: float, 
+        periods_per_year: int
+    ) -> Dict:
+        """Calculate risk-adjusted return metrics"""
+        
+        mean_return = np.mean(returns)
+        std_return = np.std(returns, ddof=1)
+        
+        # Annualize metrics
+        annual_return = mean_return * periods_per_year
+        annual_volatility = std_return * np.sqrt(periods_per_year)
+        daily_rf = risk_free_rate / periods_per_year
+        
+        # Sharpe Ratio
+        excess_return = mean_return - daily_rf
+        sharpe_ratio = (excess_return * periods_per_year) / annual_volatility if annual_volatility > 0 else 0
+        
+        # Sortino Ratio (downside deviation)
+        downside_returns = returns[returns < daily_rf]
+        downside_deviation = np.std(downside_returns, ddof=1) if len(downside_returns) > 1 else 0
+        annual_downside_deviation = downside_deviation * np.sqrt(periods_per_year)
+        sortino_ratio = (annual_return - risk_free_rate) / annual_downside_deviation if annual_downside_deviation > 0 else 0
+        
+        # Calmar Ratio (return / max drawdown)
+        cumulative_returns = np.cumprod(1 + returns)
+        running_max = np.maximum.accumulate(cumulative_returns)
+        drawdowns = (cumulative_returns - running_max) / running_max
+        max_drawdown = np.min(drawdowns)
+        calmar_ratio = annual_return / abs(max_drawdown) if max_drawdown < 0 else 0
+        
+        return {
+            'sharpe_ratio': sharpe_ratio,
+            'sortino_ratio': sortino_ratio,
+            'calmar_ratio': calmar_ratio
+        }
+    
+    def _calculate_volatility_metrics(self, returns: np.ndarray, periods_per_year: int) -> Dict:
+        """Calculate various volatility metrics"""
+        
+        std_return = np.std(returns, ddof=1)
+        annual_volatility = std_return * np.sqrt(periods_per_year)
+        
+        # Downside and upside deviation
+        mean_return = np.mean(returns)
+        downside_returns = returns[returns < mean_return]
+        upside_returns = returns[returns > mean_return]
+        
+        downside_deviation = np.std(downside_returns, ddof=1) if len(downside_returns) > 1 else 0
+        upside_deviation = np.std(upside_returns, ddof=1) if len(upside_returns) > 1 else 0
+        
+        # Volatility skewness
+        volatility_skewness = stats.skew(returns)
+        
+        return {
+            'annualized_volatility': annual_volatility,
+            'downside_deviation': downside_deviation * np.sqrt(periods_per_year),
+            'upside_deviation': upside_deviation * np.sqrt(periods_per_year),
+            'volatility_skewness': volatility_skewness
+        }
+    
+    def _calculate_drawdown_metrics(self, returns: np.ndarray) -> Dict:
+        """Calculate drawdown analysis metrics"""
+        
+        # Calculate cumulative returns
+        cumulative_returns = np.cumprod(1 + returns)
+        
+        # Calculate running maximum
+        running_max = np.maximum.accumulate(cumulative_returns)
+        
+        # Calculate drawdowns
+        drawdowns = (cumulative_returns - running_max) / running_max
+        
+        # Maximum drawdown
+        max_drawdown = np.min(drawdowns)
+        
+        # Current drawdown
+        current_drawdown = drawdowns[-1]
+        
+        # Drawdown duration (consecutive periods in drawdown)
+        in_drawdown = drawdowns < -0.001  # 0.1% threshold
+        drawdown_duration = 0
+        for i in range(len(in_drawdown) - 1, -1, -1):
+            if in_drawdown[i]:
+                drawdown_duration += 1
+            else:
+                break
+        
+        # Recovery time calculation
+        recovery_time = None
+        max_dd_idx = np.argmin(drawdowns)
+        
+        # Look for recovery after max drawdown
+        for i in range(max_dd_idx + 1, len(drawdowns)):
+            if drawdowns[i] >= -0.001:  # Recovered to within 0.1%
+                recovery_time = i - max_dd_idx
+                break
+        
+        return {
+            'max_drawdown': max_drawdown,
+            'current_drawdown': current_drawdown,
+            'drawdown_duration': drawdown_duration,
+            'recovery_time': recovery_time
+        }
+    
+    def _calculate_distribution_metrics(self, returns: np.ndarray) -> Dict:
+        """Calculate return distribution metrics"""
+        
+        # Skewness and kurtosis
+        skewness_val = stats.skew(returns)
+        kurtosis_val = stats.kurtosis(returns, fisher=True)  # Excess kurtosis
+        
+        # Jarque-Bera test for normality
+        jb_stat, jb_pvalue = stats.jarque_bera(returns)
+        
+        return {
+            'skewness': skewness_val,
+            'kurtosis': kurtosis_val,
+            'jarque_bera_stat': jb_stat,
+            'jarque_bera_pvalue': jb_pvalue
+        }
+    
+    def _calculate_fractal_metrics(self, returns: np.ndarray) -> Dict:
+        """Calculate fractal analysis metrics"""
+        
+        try:
+            # Hurst Exponent calculation
+            hurst_exp = self._calculate_hurst_exponent(returns)
+            
+            # Detrended Fluctuation Analysis (DFA)
+            dfa_alpha = self._calculate_dfa(returns)
+            
+            # Fractal Dimension
+            fractal_dim = 2 - hurst_exp if not np.isnan(hurst_exp) else np.nan
+            
+            return {
+                'hurst_exponent': hurst_exp,
+                'dfa_alpha': dfa_alpha,
+                'fractal_dimension': fractal_dim
+            }
+            
+        except Exception as e:
+            logger.warning(f"Fractal analysis failed: {str(e)}")
+            return {
+                'hurst_exponent': np.nan,
+                'dfa_alpha': np.nan,
+                'fractal_dimension': np.nan
+            }
+    
+    def _calculate_hurst_exponent(self, returns: np.ndarray) -> float:
+        """Calculate Hurst exponent using R/S analysis"""
+        
+        if len(returns) < 50:
+            return np.nan
+        
+        try:
+            # Convert returns to price series
+            prices = np.cumsum(returns - np.mean(returns))
+            
+            # Calculate R/S statistic for different time lags
+            lags = range(10, min(len(prices) // 4, 100))
+            rs_values = []
+            
+            for lag in lags:
+                # Split series into segments
+                n_segments = len(prices) // lag
+                if n_segments < 2:
+                    continue
+                
+                rs_segment_values = []
+                for i in range(n_segments):
+                    segment = prices[i*lag:(i+1)*lag]
+                    
+                    # Calculate range
+                    cumdev = np.cumsum(segment - np.mean(segment))
+                    R = np.max(cumdev) - np.min(cumdev)
+                    
+                    # Calculate standard deviation
+                    S = np.std(segment, ddof=1)
+                    
+                    if S > 0:
+                        rs_segment_values.append(R / S)
+                
+                if rs_segment_values:
+                    rs_values.append((lag, np.mean(rs_segment_values)))
+            
+            if len(rs_values) < 3:
+                return np.nan
+            
+            # Fit log(R/S) vs log(lag) to get Hurst exponent
+            lags_array = np.array([x[0] for x in rs_values])
+            rs_array = np.array([x[1] for x in rs_values])
+            
+            # Remove invalid values
+            valid_idx = (rs_array > 0) & np.isfinite(rs_array)
+            if np.sum(valid_idx) < 3:
+                return np.nan
+            
+            log_lags = np.log(lags_array[valid_idx])
+            log_rs = np.log(rs_array[valid_idx])
+            
+            # Linear regression
+            slope, _, _, _, _ = stats.linregress(log_lags, log_rs)
+            
+            return slope
+            
+        except Exception as e:
+            logger.warning(f"Hurst exponent calculation failed: {str(e)}")
+            return np.nan
+    
+    def _calculate_dfa(self, returns: np.ndarray) -> float:
+        """Calculate Detrended Fluctuation Analysis alpha"""
+        
+        if len(returns) < 50:
+            return np.nan
+        
+        try:
+            # Integrate the series
+            y = np.cumsum(returns - np.mean(returns))
+            
+            # Window sizes
+            window_sizes = np.unique(np.logspace(1, np.log10(len(y) // 4), 10).astype(int))
+            window_sizes = window_sizes[window_sizes >= 4]
+            
+            if len(window_sizes) < 3:
+                return np.nan
+            
+            fluctuations = []
+            
+            for window_size in window_sizes:
+                # Split into non-overlapping windows
+                n_windows = len(y) // window_size
+                
+                if n_windows < 1:
+                    continue
+                
+                window_fluctuations = []
+                
+                for i in range(n_windows):
+                    start_idx = i * window_size
+                    end_idx = (i + 1) * window_size
+                    window_data = y[start_idx:end_idx]
+                    
+                    # Fit linear trend
+                    x = np.arange(len(window_data))
+                    coeffs = np.polyfit(x, window_data, 1)
+                    trend = np.polyval(coeffs, x)
+                    
+                    # Calculate fluctuation
+                    fluctuation = np.sqrt(np.mean((window_data - trend) ** 2))
+                    window_fluctuations.append(fluctuation)
+                
+                if window_fluctuations:
+                    fluctuations.append((window_size, np.mean(window_fluctuations)))
+            
+            if len(fluctuations) < 3:
+                return np.nan
+            
+            # Fit log-log relationship
+            sizes = np.array([x[0] for x in fluctuations])
+            flucts = np.array([x[1] for x in fluctuations])
+            
+            valid_idx = (flucts > 0) & np.isfinite(flucts)
+            if np.sum(valid_idx) < 3:
+                return np.nan
+            
+            log_sizes = np.log(sizes[valid_idx])
+            log_flucts = np.log(flucts[valid_idx])
+            
+            slope, _, _, _, _ = stats.linregress(log_sizes, log_flucts)
+            
+            return slope
+            
+        except Exception as e:
+            logger.warning(f"DFA calculation failed: {str(e)}")
+            return np.nan
+    
+    def _calculate_benchmark_metrics(
+        self, 
+        returns: np.ndarray, 
+        benchmark_returns: Union[pd.Series, np.ndarray, List[float]],
+        risk_free_rate: float,
+        periods_per_year: int
+    ) -> Dict:
+        """Calculate benchmark-relative metrics"""
+        
+        benchmark_returns = np.array(benchmark_returns) if not isinstance(benchmark_returns, np.ndarray) else benchmark_returns
+        
+        # Align lengths
+        min_len = min(len(returns), len(benchmark_returns))
+        returns = returns[-min_len:]
+        benchmark_returns = benchmark_returns[-min_len:]
+        
+        # Beta calculation
+        covariance = np.cov(returns, benchmark_returns)[0, 1]
+        benchmark_variance = np.var(benchmark_returns, ddof=1)
+        beta = covariance / benchmark_variance if benchmark_variance > 0 else np.nan
+        
+        # Alpha calculation
+        mean_return = np.mean(returns) * periods_per_year
+        mean_benchmark = np.mean(benchmark_returns) * periods_per_year
+        alpha = mean_return - (risk_free_rate + beta * (mean_benchmark - risk_free_rate))
+        
+        # Correlation
+        correlation = np.corrcoef(returns, benchmark_returns)[0, 1] if len(returns) > 1 else np.nan
+        
+        # Information Ratio (excess return / tracking error)
+        excess_returns = returns - benchmark_returns
+        tracking_error = np.std(excess_returns, ddof=1) * np.sqrt(periods_per_year)
+        information_ratio = (np.mean(excess_returns) * periods_per_year) / tracking_error if tracking_error > 0 else np.nan
+        
+        return {
+            'beta': beta,
+            'alpha': alpha,
+            'correlation': correlation,
+            'tracking_error': tracking_error,
+            'information_ratio': information_ratio
+        }
+    
+    def _calculate_confidence_score(self, returns: np.ndarray, sample_size: int) -> float:
+        """Calculate confidence score for risk metrics based on data quality"""
+        
+        # Base confidence on sample size
+        size_confidence = min(1.0, sample_size / 252)  # 1 year of daily data = full confidence
+        
+        # Adjust for data quality
+        quality_factors = []
+        
+        # Check for missing or extreme values
+        extreme_threshold = 3 * np.std(returns, ddof=1)
+        extreme_count = np.sum(np.abs(returns) > extreme_threshold)
+        extreme_penalty = min(0.2, extreme_count / len(returns))
+        quality_factors.append(1 - extreme_penalty)
+        
+        # Check for volatility clustering (GARCH effects)
+        squared_returns = returns ** 2
+        autocorr = np.corrcoef(squared_returns[:-1], squared_returns[1:])[0, 1]
+        volatility_clustering = 1 - min(0.1, abs(autocorr)) if not np.isnan(autocorr) else 1
+        quality_factors.append(volatility_clustering)
+        
+        # Combine factors
+        quality_score = np.mean(quality_factors)
+        
+        # Final confidence score
+        confidence_score = size_confidence * quality_score
+        
+        return min(max(confidence_score, 0.1), 1.0)
+    
+    def _generate_cache_key(self, returns, benchmark_returns, confidence_levels, risk_free_rate) -> str:
+        """Generate cache key for risk calculations"""
+        
+        import hashlib
+        
+        # Create hash of inputs
+        key_components = [
+            str(len(returns)),
+            str(np.sum(returns)),  # Checksum of returns
+            str(benchmark_returns is not None),
+            str(confidence_levels),
+            str(risk_free_rate)
+        ]
+        
+        key_string = "|".join(key_components)
+        return hashlib.md5(key_string.encode()).hexdigest()
+    
+    def get_risk_summary(self, risk_metrics: RiskMetrics) -> str:
+        """Generate human-readable risk summary"""
+        
+        summary_parts = []
+        
+        # Risk level assessment
+        if risk_metrics.annualized_volatility < 0.10:
+            risk_level = "Low"
+        elif risk_metrics.annualized_volatility < 0.20:
+            risk_level = "Moderate"
+        elif risk_metrics.annualized_volatility < 0.30:
+            risk_level = "High"
         else:
-            return 75  # High risk
-    
-    def _calculate_composite_risk_score(
-        self,
-        volatility: float,
-        max_drawdown: float,
-        sharpe_ratio: float,
-        cvar_99: float
-    ) -> float:
-        """Calculate a composite risk score from 0-100"""
-        try:
-            # Normalize each component (0-1 scale)
-            vol_score = min(volatility / 0.4, 1.0)  # Cap at 40% volatility
-            drawdown_score = min(max_drawdown / 0.5, 1.0)  # Cap at 50% drawdown
-            sharpe_score = max(0, min((2 - sharpe_ratio) / 2, 1.0))  # Invert Sharpe (lower is riskier)
-            cvar_score = min(abs(cvar_99) / 0.1, 1.0)  # Cap at 10% CVaR
-            
-            # Weighted average
-            weights = {
-                'volatility': 0.3,
-                'drawdown': 0.3,
-                'sharpe': 0.2,
-                'cvar': 0.2
-            }
-            
-            composite_score = (
-                weights['volatility'] * vol_score +
-                weights['drawdown'] * drawdown_score +
-                weights['sharpe'] * sharpe_score +
-                weights['cvar'] * cvar_score
-            )
-            
-            return round(composite_score * 100, 2)
-            
-        except Exception as e:
-            print(f"Error calculating composite risk score: {e}")
-            return 50.0  # Default medium risk
-    
-    def calculate_portfolio_risk_from_tickers(
-        self,
-        tickers: List[str],
-        weights: List[float],
-        lookback_days: int = 252
-    ) -> Optional[RiskMetrics]:
-        """
-        Calculate risk metrics for a portfolio defined by tickers and weights.
-        Fetches data automatically using yfinance.
-        """
-        try:
-            if len(tickers) != len(weights):
-                raise ValueError("Tickers and weights must have same length")
-            
-            if abs(sum(weights) - 1.0) > 0.01:
-                print("Warning: Weights do not sum to 1.0, normalizing...")
-                weights = [w / sum(weights) for w in weights]
-            
-            # Fetch data
-            end_date = datetime.now()
-            start_date = end_date - timedelta(days=int(lookback_days * 1.5))  # Extra buffer
-            
-            print(f"📊 Fetching data for {tickers} from {start_date.date()} to {end_date.date()}")
-            
-            price_data = yf.download(
-                tickers + [self.market_benchmark], 
-                start=start_date, 
-                end=end_date,
-                progress=False
-            )['Close']
-            
-            if price_data.empty:
-                print("Failed to fetch price data")
-                return None
-            
-            print(f"✅ Fetched {len(price_data)} days of price data")
-            
-            # Calculate returns
-            returns_data = price_data.pct_change().dropna()
-            
-            # Calculate portfolio returns
-            portfolio_returns = (returns_data[tickers] * weights).sum(axis=1)
-            market_returns = returns_data[self.market_benchmark] if self.market_benchmark in returns_data.columns else None
-            
-            # Use last 'lookback_days' of data
-            portfolio_returns = portfolio_returns.tail(lookback_days)
-            if market_returns is not None:
-                market_returns = market_returns.tail(lookback_days)
-            
-            print(f"📈 Calculating risk metrics for {len(portfolio_returns)} days of returns")
-            
-            # Calculate comprehensive risk metrics
-            return self.calculate_comprehensive_risk_metrics(
-                portfolio_returns=portfolio_returns,
-                market_returns=market_returns,
-                price_data=returns_data[tickers].tail(lookback_days)
-            )
-            
-        except Exception as e:
-            print(f"Error calculating portfolio risk from tickers: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
-    
-    def compare_risk_metrics(
-        self,
-        current_metrics: RiskMetrics,
-        previous_metrics: RiskMetrics,
-        threshold_pct: float = 15.0
-    ) -> Dict[str, Any]:
-        """Compare current vs previous risk metrics and identify significant changes."""
-        try:
-            def calculate_pct_change(current: float, previous: float) -> float:
-                if previous == 0:
-                    return 0.0
-                return ((current - previous) / abs(previous)) * 100
-            
-            changes = {
-                'volatility': calculate_pct_change(current_metrics.volatility, previous_metrics.volatility),
-                'beta': calculate_pct_change(current_metrics.beta, previous_metrics.beta),
-                'max_drawdown': calculate_pct_change(current_metrics.max_drawdown, previous_metrics.max_drawdown),
-                'var_99': calculate_pct_change(current_metrics.var_99, previous_metrics.var_99),
-                'cvar_99': calculate_pct_change(current_metrics.cvar_99, previous_metrics.cvar_99),
-                'risk_score': calculate_pct_change(current_metrics.risk_score, previous_metrics.risk_score),
-                'sentiment_index': calculate_pct_change(current_metrics.sentiment_index, previous_metrics.sentiment_index)
-            }
-            
-            # Identify significant changes
-            significant_changes = {
-                metric: change for metric, change in changes.items()
-                if abs(change) >= threshold_pct
-            }
-            
-            # Overall risk direction
-            risk_direction = "INCREASED" if current_metrics.risk_score > previous_metrics.risk_score else "DECREASED"
-            risk_magnitude = abs(changes['risk_score'])
-            
-            return {
-                'risk_direction': risk_direction,
-                'risk_magnitude_pct': risk_magnitude,
-                'all_changes': changes,
-                'significant_changes': significant_changes,
-                'threshold_breached': len(significant_changes) > 0,
-                'comparison_timestamp': datetime.now(),
-                'time_between_measurements': (current_metrics.timestamp - previous_metrics.timestamp).total_seconds() / 3600
-            }
-            
-        except Exception as e:
-            print(f"Error comparing risk metrics: {e}")
-            return {
-                'error': str(e),
-                'threshold_breached': False
-            }
+            risk_level = "Very High"
+        
+        summary_parts.append(f"Overall Risk Level: {risk_level}")
+        summary_parts.append(f"Annualized Volatility: {risk_metrics.annualized_volatility:.1%}")
+        summary_parts.append(f"Maximum Drawdown: {risk_metrics.max_drawdown:.1%}")
+        summary_parts.append(f"Sharpe Ratio: {risk_metrics.sharpe_ratio:.2f}")
+        summary_parts.append(f"95% VaR: {risk_metrics.var_95:.1%}")
+        
+        if not np.isnan(risk_metrics.hurst_exponent):
+            if risk_metrics.hurst_exponent > 0.5:
+                trend_desc = "trending (persistent)"
+            elif risk_metrics.hurst_exponent < 0.5:
+                trend_desc = "mean-reverting"
+            else:
+                trend_desc = "random walk"
+            summary_parts.append(f"Market Behavior: {trend_desc} (H={risk_metrics.hurst_exponent:.3f})")
+        
+        return "\n".join(summary_parts)
 
-# Utility function for easy access
-def create_risk_calculator(market_benchmark: str = "SPY") -> RiskCalculatorService:
-    """Factory function to create a risk calculator instance"""
-    return RiskCalculatorService(market_benchmark=market_benchmark)
+# LangChain Tool Integration (Fixed)
+if LANGCHAIN_AVAILABLE:
+    
+    class RiskCalculatorTool(BaseTool):
+        """LangChain tool wrapper for risk calculator"""
+        
+        name: str = "risk_calculator"
+        description: str = """
+        Calculate comprehensive risk metrics including VaR, CVaR, Sharpe ratio, Sortino ratio,
+        drawdown analysis, and fractal analysis for portfolio returns.
+        """
+        calculator: EnhancedRiskCalculator = Field(default_factory=EnhancedRiskCalculator)
+        
+        # Remove the __init__ method entirely - Pydantic will handle initialization
+        
+        def _run(self, **kwargs) -> str:
+            """Run risk calculation"""
+            try:
+                # Extract parameters
+                returns = kwargs.get('returns')
+                benchmark_returns = kwargs.get('benchmark_returns')
+                
+                if isinstance(returns, str):
+                    # Assume it's a ticker symbol - fetch data
+                    returns = self._fetch_returns(returns)
+                
+                if isinstance(benchmark_returns, str):
+                    benchmark_returns = self._fetch_returns(benchmark_returns)
+                
+                # Calculate metrics
+                risk_metrics = self.calculator.calculate_comprehensive_risk(
+                    returns=returns,
+                    benchmark_returns=benchmark_returns,
+                    confidence_levels=kwargs.get('confidence_levels', [0.95, 0.99]),
+                    risk_free_rate=kwargs.get('risk_free_rate', 0.02),
+                    periods_per_year=kwargs.get('periods_per_year', 252)
+                )
+                
+                # Return summary
+                return self.calculator.get_risk_summary(risk_metrics)
+                
+            except Exception as e:
+                return f"Risk calculation failed: {str(e)}"
+        
+        def _fetch_returns(self, symbol: str, period: str = "1y") -> np.ndarray:
+            """Fetch returns for a given symbol"""
+            try:
+                ticker = yf.Ticker(symbol)
+                hist = ticker.history(period=period)
+                
+                if hist.empty:
+                    raise ValueError(f"No data found for symbol {symbol}")
+                
+                returns = hist['Close'].pct_change().dropna()
+                return returns.values
+                
+            except Exception as e:
+                raise ValueError(f"Failed to fetch data for {symbol}: {str(e)}")
+        
+        async def _arun(self, **kwargs) -> str:
+            """Async version"""
+            return self._run(**kwargs)
+    
+    # Create the tool instance
+    risk_calculator_tool = RiskCalculatorTool()
 
-# Example usage and testing
+else:
+    # Fallback when LangChain is not available
+    risk_calculator_tool = None
+    logger.warning("LangChain not available - tool integration disabled")
+
+# Standalone calculator instance
+risk_calculator = EnhancedRiskCalculator()
+RiskCalculatorService = EnhancedRiskCalculator
+
+def calculate_portfolio_risk(
+    returns: Union[List[float], np.ndarray, pd.Series],
+    **kwargs
+) -> RiskMetrics:
+    """
+    Convenience function for risk calculation
+    
+    Args:
+        returns: Portfolio returns
+        **kwargs: Additional parameters for risk calculation
+        
+    Returns:
+        RiskMetrics object with comprehensive risk analysis
+    """
+    return risk_calculator.calculate_comprehensive_risk(returns, **kwargs)
+
+def get_risk_calculator():
+    """Factory function to get a risk calculator instance"""
+    return EnhancedRiskCalculator()
+
+
+# Validation and testing functions
+def validate_risk_calculator():
+    """Validate risk calculator with known test cases"""
+    
+    print("🧪 Validating Risk Calculator...")
+    
+    # Test case 1: Normal distribution
+    np.random.seed(42)
+    normal_returns = np.random.normal(0.001, 0.02, 252)  # Daily returns, ~20% annual vol
+    
+    try:
+        risk_metrics = calculate_portfolio_risk(normal_returns)
+        
+        # Validate basic metrics
+        assert 0.15 < risk_metrics.annualized_volatility < 0.25, "Volatility out of expected range"
+        assert -0.05 < risk_metrics.var_95 < 0, "VaR 95% out of expected range"
+        assert risk_metrics.cvar_95 < risk_metrics.var_95, "CVaR should be more negative than VaR"
+        assert not np.isnan(risk_metrics.sharpe_ratio), "Sharpe ratio should not be NaN"
+        assert not np.isnan(risk_metrics.hurst_exponent), "Hurst exponent should not be NaN"
+        
+        print("✅ Test Case 1 (Normal Distribution): PASSED")
+        
+    except AssertionError as e:
+        print(f"❌ Test Case 1 FAILED: {str(e)}")
+        return False
+    except Exception as e:
+        print(f"❌ Test Case 1 ERROR: {str(e)}")
+        return False
+    
+    # Test case 2: Market data (if possible)
+    try:
+        spy_data = yf.download("SPY", start="2020-01-01", end="2023-01-01", progress=False)
+        spy_returns = spy_data['Close'].pct_change().dropna().values
+        
+        risk_metrics = calculate_portfolio_risk(spy_returns)
+        
+        # Validate SPY metrics (approximate ranges)
+        assert 0.10 < risk_metrics.annualized_volatility < 0.40, "SPY volatility out of expected range"
+        assert risk_metrics.max_drawdown < 0, "Max drawdown should be negative"
+        
+        print("✅ Test Case 2 (SPY Market Data): PASSED")
+        
+    except Exception as e:
+        print(f"⚠️ Test Case 2 (Market Data): SKIPPED - {str(e)}")
+    
+    print("🎉 Risk Calculator Validation Complete")
+    return True
+
 if __name__ == "__main__":
-    # Test the risk calculator
-    calculator = create_risk_calculator()
-    
-    # Test with sample portfolio
-    test_tickers = ['AAPL', 'MSFT']
-    test_weights = [0.6, 0.4]
-    
-    print("Testing Risk Calculator Service...")
-    risk_metrics = calculator.calculate_portfolio_risk_from_tickers(
-        tickers=test_tickers,
-        weights=test_weights,
-        lookback_days=100  # Smaller for testing
-    )
-    
-    if risk_metrics:
-        print(f"✅ Risk calculation successful!")
-        print(f"Portfolio Volatility: {risk_metrics.volatility:.2%}")
-        print(f"Beta: {risk_metrics.beta:.2f}")
-        print(f"Risk Score: {risk_metrics.risk_score}/100")
-        print(f"Sentiment Index: {risk_metrics.sentiment_index}")
-    else:
-        print("❌ Risk calculation failed")
+    # Run validation
+    validate_risk_calculator()

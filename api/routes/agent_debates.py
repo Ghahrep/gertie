@@ -17,7 +17,9 @@ from enum import Enum
 # Import our revolutionary debate system
 from mcp.debate_engine import DebateEngine
 from mcp.consensus_builder import ConsensusBuilder
-from api.dependencies import get_mcp_client, get_current_user, get_portfolio_context
+from api.routes.auth import get_current_user
+from services.mcp_client import get_mcp_client
+from smart_suggestions.suggestion_engine import get_portfolio_context
 from api.schemas import BaseResponse
 
 router = APIRouter(prefix="/debates", tags=["Multi-Agent Debates"])
@@ -584,8 +586,8 @@ async def get_debate_templates():
 async def initiate_debate_from_template(
     template_id: str,
     portfolio_id: str,
-    custom_query: Optional[str] = None,
-    background_tasks: BackgroundTasks,
+    background_tasks: BackgroundTasks,  # Move this up
+    custom_query: Optional[str] = None,  # Optional parameters after required ones
     mcp_client = Depends(get_mcp_client),
     current_user = Depends(get_current_user)
 ):

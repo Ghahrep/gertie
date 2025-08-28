@@ -1,0 +1,594 @@
+# services/monitoring_orchestrator.py
+"""
+Production Monitoring Orchestrator
+Coordinates all Task 2.2 components for the proactive monitoring system
+"""
+
+import asyncio
+import logging
+from typing import Dict, List, Optional, Any
+from datetime import datetime, timedelta
+from dataclasses import dataclass
+
+# Import Task 2.2 components
+from services.alert_management_system import (
+    AlertManagementSystem, get_alert_management_system, AlertSeverity
+)
+from services.task_scheduler import (
+    BackgroundTaskScheduler, get_task_scheduler, TaskDefinition, TaskPriority,
+    setup_portfolio_monitoring_tasks
+)
+from services.workflow_integration import (
+    WorkflowIntegrationEngine, get_workflow_integration_engine,
+    WorkflowContext, WorkflowTrigger, WorkflowPriority
+)
+
+# Import existing services
+from services.portfolio_monitor_service import get_portfolio_monitor_service
+from services.proactive_monitor import get_proactive_monitor
+from db.models import RiskChangeEvent, ProactiveAlert
+from db.session import get_db
+
+logger = logging.getLogger(__name__)
+
+@dataclass
+class MonitoringSystemStatus:
+    """Status of the complete monitoring system"""
+    portfolio_monitor_active: bool
+    alert_system_active: bool
+    scheduler_active: bool
+    workflow_engine_active: bool
+    total_active_monitors: int
+    recent_alerts_count: int
+    pending_workflows: int
+    system_health: str  # "healthy", "degraded", "critical"
+
+class ProactiveMonitoringOrchestrator:
+    """
+    Production orchestrator that coordinates all Task 2.2 components
+    Provides unified interface for the complete proactive monitoring system
+    """
+    
+    def __init__(self):
+        # Component instances (initialized lazily)
+        self.portfolio_monitor = None
+        self.alert_system = None
+        self.task_scheduler = None
+        self.workflow_engine = None
+        self.proactive_monitor = None
+        
+        self.is_initialized = False
+        self.system_status = MonitoringSystemStatus(
+            portfolio_monitor_active=False,
+            alert_system_active=False,
+            scheduler_active=False,
+            workflow_engine_active=False,
+            total_active_monitors=0,
+            recent_alerts_count=0,
+            pending_workflows=0,
+            system_health="initializing"
+        )
+        
+        logger.info("Proactive Monitoring Orchestrator created")
+    
+    async def initialize_all_systems(self) -> bool:
+        """Initialize all monitoring system components"""
+        try:
+            logger.info("Initializing complete proactive monitoring system...")
+            
+            # Initialize core services with individual error handling
+            logger.info("Initializing portfolio monitor service...")
+            try:
+                self.portfolio_monitor = await get_portfolio_monitor_service()
+                if self.portfolio_monitor is None:
+                    logger.error("Portfolio monitor service returned None")
+                    return False
+                logger.info(f"Portfolio monitor initialized: {type(self.portfolio_monitor).__name__}")
+            except Exception as e:
+                logger.error(f"Failed to initialize portfolio monitor: {e}")
+                return False
+            
+            logger.info("Initializing alert management system...")
+            try:
+                self.alert_system = await get_alert_management_system()
+                if self.alert_system is None:
+                    logger.error("Alert management system returned None")
+                    return False
+                logger.info(f"Alert system initialized: {type(self.alert_system).__name__}")
+            except Exception as e:
+                logger.error(f"Failed to initialize alert system: {e}")
+                return False
+            
+            logger.info("Initializing task scheduler...")
+            try:
+                self.task_scheduler = await get_task_scheduler()
+                if self.task_scheduler is None:
+                    logger.error("Task scheduler returned None")
+                    return False
+                logger.info(f"Task scheduler initialized: {type(self.task_scheduler).__name__}")
+            except Exception as e:
+                logger.error(f"Failed to initialize task scheduler: {e}")
+                return False
+            
+            logger.info("Initializing workflow engine...")
+            try:
+                self.workflow_engine = await get_workflow_integration_engine()
+                if self.workflow_engine is None:
+                    logger.error("Workflow engine returned None")
+                    return False
+                logger.info(f"Workflow engine initialized: {type(self.workflow_engine).__name__}")
+            except Exception as e:
+                logger.error(f"Failed to initialize workflow engine: {e}")
+                return False
+            
+            logger.info("Initializing proactive monitor...")
+            try:
+                self.proactive_monitor = await get_proactive_monitor()
+                if self.proactive_monitor is None:
+                    logger.error("Proactive monitor returned None")
+                    return False
+                logger.info(f"Proactive monitor initialized: {type(self.proactive_monitor).__name__}")
+            except Exception as e:
+                logger.error(f"Failed to initialize proactive monitor: {e}")
+                return False
+            
+            # Start background scheduler with error handling
+            logger.info("Starting background scheduler...")
+            try:
+                scheduler_started = await self.task_scheduler.start()
+                self.system_status.scheduler_active = scheduler_started
+                
+                if scheduler_started:
+                    logger.info("Scheduler started successfully")
+                    # Setup standard monitoring tasks
+                    try:
+                        await setup_portfolio_monitoring_tasks(self.task_scheduler)
+                        logger.info("Portfolio monitoring tasks scheduled")
+                    except Exception as e:
+                        logger.warning(f"Failed to setup portfolio monitoring tasks: {e}")
+                        # Don't fail initialization for this
+                else:
+                    logger.warning("Scheduler failed to start")
+                    
+            except Exception as e:
+                logger.error(f"Failed to start scheduler: {e}")
+                self.system_status.scheduler_active = False
+                # Don't return False here - continue with initialization
+            
+            # Start portfolio monitoring with error handling
+            logger.info("Starting portfolio monitoring...")
+            try:
+                monitor_result = await self.portfolio_monitor.start_monitoring()
+                if isinstance(monitor_result, dict):
+                    self.system_status.portfolio_monitor_active = monitor_result.get("status") == "started"
+                else:
+                    # Handle case where start_monitoring returns boolean or other type
+                    self.system_status.portfolio_monitor_active = bool(monitor_result)
+                
+                if self.system_status.portfolio_monitor_active:
+                    logger.info("Portfolio monitoring started successfully")
+                else:
+                    logger.warning(f"Portfolio monitoring start returned: {monitor_result}")
+                    
+            except Exception as e:
+                logger.error(f"Failed to start portfolio monitoring: {e}")
+                self.system_status.portfolio_monitor_active = False
+                # Don't return False here - continue with initialization
+            
+            # Update system status - mark components as active if they were initialized
+            self.system_status.alert_system_active = self.alert_system is not None
+            self.system_status.workflow_engine_active = self.workflow_engine is not None
+            
+            # Log final component status
+            logger.info("Component initialization summary:")
+            logger.info(f"  Portfolio Monitor: {'✓' if self.portfolio_monitor else '✗'}")
+            logger.info(f"  Alert System: {'✓' if self.alert_system else '✗'}")
+            logger.info(f"  Task Scheduler: {'✓' if self.task_scheduler else '✗'}")
+            logger.info(f"  Workflow Engine: {'✓' if self.workflow_engine else '✗'}")
+            logger.info(f"  Proactive Monitor: {'✓' if self.proactive_monitor else '✗'}")
+            
+            # Check if we have the minimum required components
+            required_components = [
+                self.portfolio_monitor,
+                self.alert_system,
+                self.task_scheduler,
+                self.workflow_engine
+            ]
+            
+            active_components = sum(1 for component in required_components if component is not None)
+            
+            if active_components < 3:  # Need at least 3 out of 4 core components
+                logger.error(f"Insufficient components initialized: {active_components}/4")
+                self.system_status.system_health = "critical"
+                return False
+            
+            self.is_initialized = True
+            await self._update_system_health()
+            
+            logger.info(f"Monitoring system initialization complete - {active_components}/4 components active")
+            logger.info(f"System health: {self.system_status.system_health}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Critical error during system initialization: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            self.system_status.system_health = "critical"
+            return False
+    
+    async def start_complete_monitoring(self, user_portfolios: Dict[str, List[Dict]]) -> Dict[str, Any]:
+        """
+        Start complete monitoring for user portfolios
+        Main entry point for end-to-end monitoring
+        """
+        if not self.is_initialized:
+            await self.initialize_all_systems()
+        
+        try:
+            results = {
+                "status": "started",
+                "monitoring_components": [],
+                "portfolios_monitored": 0,
+                "alerts_configured": 0,
+                "workflows_ready": True,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+            
+            # Start proactive monitoring for each portfolio
+            total_portfolios = 0
+            for user_id, portfolios in user_portfolios.items():
+                for portfolio in portfolios:
+                    portfolio_id = portfolio.get('id')
+                    
+                    # Start proactive risk monitoring
+                    monitor_result = await self.proactive_monitor.start_portfolio_monitoring(
+                        portfolio_id, user_id
+                    )
+                    
+                    if monitor_result.get("status") == "started":
+                        total_portfolios += 1
+                        results["monitoring_components"].append({
+                            "portfolio_id": portfolio_id,
+                            "user_id": user_id,
+                            "monitoring_active": True,
+                            "alert_thresholds": monitor_result.get("alert_thresholds", {}),
+                            "monitoring_intervals": monitor_result.get("monitoring_intervals", {})
+                        })
+            
+            results["portfolios_monitored"] = total_portfolios
+            self.system_status.total_active_monitors = total_portfolios
+            
+            # Update system health
+            await self._update_system_health()
+            
+            logger.info(f"Complete monitoring started for {total_portfolios} portfolios")
+            return results
+            
+        except Exception as e:
+            logger.error(f"Failed to start complete monitoring: {e}")
+            return {"status": "error", "error": str(e)}
+    
+    async def handle_risk_event_complete_flow(
+        self, 
+        risk_event: RiskChangeEvent,
+        user_id: int,
+        portfolio_id: int,
+        auto_trigger_workflow: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Complete end-to-end flow for handling a risk event
+        Integrates all Task 2.2 components
+        """
+        try:
+            flow_result = {
+                "risk_event_id": risk_event.id,
+                "portfolio_id": portfolio_id,
+                "user_id": user_id,
+                "steps_completed": [],
+                "alerts_generated": [],
+                "workflows_triggered": [],
+                "status": "processing",
+                "timestamp": datetime.utcnow().isoformat()
+            }
+            
+            # Step 1: Generate proactive alert
+            logger.info(f"Generating alert for risk event {risk_event.id}")
+            
+            alert = await self.alert_system.generate_risk_alert(
+                portfolio_id=portfolio_id,
+                user_id=user_id,
+                risk_change_event=risk_event,
+                severity=AlertSeverity.HIGH if risk_event.risk_magnitude_pct > 20 else AlertSeverity.MEDIUM
+            )
+            
+            if alert:
+                flow_result["steps_completed"].append("alert_generated")
+                flow_result["alerts_generated"].append({
+                    "alert_id": alert.id,
+                    "priority": alert.priority,
+                    "title": alert.title,
+                    "delivery_status": alert.delivery_status
+                })
+                logger.info(f"Alert generated: {alert.id}")
+            
+            # Step 2: Trigger workflow if conditions met
+            if auto_trigger_workflow and alert:
+                logger.info(f"Evaluating workflow trigger for alert {alert.id}")
+                
+                workflow_result = await self.workflow_engine.handle_risk_alert(
+                    risk_event, alert, auto_trigger=True
+                )
+                
+                if workflow_result:
+                    flow_result["steps_completed"].append("workflow_triggered")
+                    flow_result["workflows_triggered"].append({
+                        "workflow_id": workflow_result.workflow_id,
+                        "status": workflow_result.status,
+                        "priority": "high" if risk_event.risk_magnitude_pct > 20 else "medium"
+                    })
+                    logger.info(f"Workflow triggered: {workflow_result.workflow_id}")
+            
+            # Step 3: Schedule follow-up monitoring for threshold breaches
+            if risk_event.threshold_breached:
+                logger.info("Scheduling enhanced monitoring for threshold breach")
+                
+                enhanced_monitoring_task = TaskDefinition(
+                    task_id=f"enhanced_monitor_{portfolio_id}_{risk_event.id}",
+                    name=f"Enhanced Monitoring - Portfolio {portfolio_id}",
+                    func=self._enhanced_portfolio_check,
+                    args=(portfolio_id, user_id, risk_event.id),
+                    priority=TaskPriority.HIGH,
+                    max_retries=2,
+                    timeout_seconds=180
+                )
+                
+                # Schedule for next 4 hours, every 30 minutes
+                scheduled = await self.task_scheduler.schedule_recurring_task(
+                    enhanced_monitoring_task,
+                    interval_minutes=30
+                )
+                
+                if scheduled:
+                    flow_result["steps_completed"].append("enhanced_monitoring_scheduled")
+            
+            flow_result["status"] = "completed"
+            await self._update_system_health()
+            
+            logger.info(f"Complete risk event flow processed: {len(flow_result['steps_completed'])} steps")
+            return flow_result
+            
+        except Exception as e:
+            logger.error(f"Error in complete risk event flow: {e}")
+            flow_result["status"] = "error"
+            flow_result["error"] = str(e)
+            return flow_result
+    
+    async def _enhanced_portfolio_check(self, portfolio_id: int, user_id: int, risk_event_id: int):
+        """Enhanced monitoring task for high-risk portfolios"""
+        try:
+            check_result = await self.portfolio_monitor.manual_portfolio_check(
+                str(portfolio_id), str(user_id)
+            )
+            
+            if check_result.get("risk_alert_triggered"):
+                logger.warning(f"Portfolio {portfolio_id} still showing elevated risk")
+                return {"status": "elevated_risk", "continue_monitoring": True}
+            else:
+                logger.info(f"Portfolio {portfolio_id} risk levels normalized")
+                return {"status": "risk_normalized", "continue_monitoring": False}
+                
+        except Exception as e:
+            logger.error(f"Enhanced monitoring check failed for portfolio {portfolio_id}: {e}")
+            raise
+    
+    async def _update_system_health(self):
+        """Update system health status based on component status"""
+        try:
+            # Get component statuses with proper async handling
+            scheduler_status = {}
+            if self.task_scheduler:
+                try:
+                    scheduler_status = await self.task_scheduler.get_scheduler_status()
+                except Exception as e:
+                    logger.error(f"Error getting scheduler status: {e}")
+                    scheduler_status = {}
+            
+            monitor_stats = {}
+            if self.proactive_monitor:
+                try:
+                    monitor_stats = self.proactive_monitor.get_monitoring_stats()
+                except Exception as e:
+                    logger.error(f"Error getting monitor stats: {e}")
+                    monitor_stats = {}
+        
+            workflow_stats = {}
+            if self.workflow_engine:
+                try:
+                    workflow_stats = self.workflow_engine.get_execution_statistics()
+                except Exception as e:
+                    logger.error(f"Error getting workflow stats: {e}")
+                    workflow_stats = {}
+            
+            # Update counts with proper type checking
+            self.system_status.total_active_monitors = monitor_stats.get("active_monitors", 0)
+            self.system_status.recent_alerts_count = monitor_stats.get("recent_alerts_1h", 0)
+            self.system_status.pending_workflows = workflow_stats.get("active_workflows", 0)
+            
+            # Determine overall health
+            active_components = sum([
+                self.system_status.portfolio_monitor_active,
+                self.system_status.alert_system_active,
+                self.system_status.scheduler_active,
+                self.system_status.workflow_engine_active
+            ])
+            
+            if active_components == 4:
+                self.system_status.system_health = "healthy"
+            elif active_components >= 2:
+                self.system_status.system_health = "degraded"
+            else:
+                self.system_status.system_health = "critical"
+                
+        except Exception as e:
+            logger.error(f"Error updating system health: {e}")
+            self.system_status.system_health = "unknown"
+    
+    # System Management Methods
+    async def get_complete_system_status(self) -> Dict[str, Any]:
+        """Get comprehensive status of all monitoring components"""
+        await self._update_system_health()
+        
+        try:
+            # Get component statuses with proper async handling
+            portfolio_status = {}
+            if self.portfolio_monitor:
+                try:
+                    portfolio_status = self.portfolio_monitor.get_monitoring_status()
+                except Exception as e:
+                    logger.error(f"Error getting portfolio status: {e}")
+                    portfolio_status = {}
+            
+            scheduler_status = {}
+            if self.task_scheduler:
+                try:
+                    scheduler_status = await self.task_scheduler.get_scheduler_status()
+                except Exception as e:
+                    logger.error(f"Error getting scheduler status: {e}")
+                    scheduler_status = {}
+            
+            workflow_stats = {}
+            if self.workflow_engine:
+                try:
+                    workflow_stats = self.workflow_engine.get_execution_statistics()
+                except Exception as e:
+                    logger.error(f"Error getting workflow stats: {e}")
+                    workflow_stats = {}
+            
+            return {
+                "system_overview": {
+                    "initialized": self.is_initialized,
+                    "health": self.system_status.system_health,
+                    "active_monitors": self.system_status.total_active_monitors,
+                    "recent_alerts": self.system_status.recent_alerts_count,
+                    "pending_workflows": self.system_status.pending_workflows
+                },
+                "components": {
+                    "portfolio_monitor": {
+                        "active": self.system_status.portfolio_monitor_active,
+                        "status": portfolio_status
+                    },
+                    "alert_system": {
+                        "active": self.system_status.alert_system_active
+                    },
+                    "task_scheduler": {
+                        "active": self.system_status.scheduler_active,
+                        "status": scheduler_status
+                    },
+                    "workflow_engine": {
+                        "active": self.system_status.workflow_engine_active,
+                        "stats": workflow_stats
+                    }
+                },
+                "timestamp": datetime.utcnow().isoformat()
+            }
+            
+        except Exception as e:
+            logger.error(f"Error getting system status: {e}")
+            return {"error": str(e), "system_health": self.system_status.system_health}
+    
+    async def stop_all_monitoring(self) -> Dict[str, Any]:
+        """Gracefully stop all monitoring components"""
+        try:
+            results = {
+                "portfolio_monitor_stopped": False,
+                "scheduler_stopped": False,
+                "active_workflows_cancelled": 0,
+                "status": "stopping"
+            }
+            
+            # Stop portfolio monitoring
+            if self.portfolio_monitor:
+                try:
+                    stop_result = await self.portfolio_monitor.stop_monitoring()
+                    if isinstance(stop_result, dict):
+                        results["portfolio_monitor_stopped"] = stop_result.get("status") == "stopped"
+                    else:
+                        results["portfolio_monitor_stopped"] = bool(stop_result)
+                except Exception as e:
+                    logger.error(f"Error stopping portfolio monitor: {e}")
+                    results["portfolio_monitor_stopped"] = False
+            
+            # Stop task scheduler
+            if self.task_scheduler:
+                scheduler_stopped = self.task_scheduler.stop()
+                results["scheduler_stopped"] = scheduler_stopped
+            
+            # Cancel active workflows
+            if self.workflow_engine and hasattr(self.workflow_engine, 'active_workflows'):
+                cancelled_count = 0
+                for workflow_id in list(self.workflow_engine.active_workflows.keys()):
+                    success = await self.workflow_engine.cancel_workflow(workflow_id)
+                    if success:
+                        cancelled_count += 1
+                results["active_workflows_cancelled"] = cancelled_count
+            
+            # Reset status
+            self.system_status = MonitoringSystemStatus(
+                portfolio_monitor_active=False,
+                alert_system_active=False,
+                scheduler_active=False,
+                workflow_engine_active=False,
+                total_active_monitors=0,
+                recent_alerts_count=0,
+                pending_workflows=0,
+                system_health="stopped"
+            )
+            
+            results["status"] = "stopped"
+            logger.info("All monitoring systems stopped gracefully")
+            return results
+            
+        except Exception as e:
+            logger.error(f"Error stopping monitoring systems: {e}")
+            return {"status": "error", "error": str(e)}
+
+
+# Global orchestrator instance
+_monitoring_orchestrator = None
+
+async def get_monitoring_orchestrator() -> ProactiveMonitoringOrchestrator:
+    """Get global monitoring orchestrator instance"""
+    global _monitoring_orchestrator
+    if _monitoring_orchestrator is None:
+        _monitoring_orchestrator = ProactiveMonitoringOrchestrator()
+    return _monitoring_orchestrator
+
+# Main API functions
+async def start_complete_proactive_monitoring(user_portfolios: Dict[str, List[Dict]]) -> Dict[str, Any]:
+    """Start complete proactive monitoring system"""
+    orchestrator = await get_monitoring_orchestrator()
+    return await orchestrator.start_complete_monitoring(user_portfolios)
+
+async def get_monitoring_system_status() -> Dict[str, Any]:
+    """Get complete monitoring system status"""
+    orchestrator = await get_monitoring_orchestrator()
+    return await orchestrator.get_complete_system_status()
+
+async def stop_monitoring_system() -> Dict[str, Any]:
+    """Stop all monitoring components"""
+    orchestrator = await get_monitoring_orchestrator()
+    return await orchestrator.stop_all_monitoring()
+
+async def handle_risk_event(
+    risk_event: RiskChangeEvent,
+    user_id: int,
+    portfolio_id: int,
+    auto_trigger_workflow: bool = True
+) -> Dict[str, Any]:
+    """Handle risk event with complete flow"""
+    orchestrator = await get_monitoring_orchestrator()
+    return await orchestrator.handle_risk_event_complete_flow(
+        risk_event, user_id, portfolio_id, auto_trigger_workflow
+    )
+
+MonitoringOrchestrator = ProactiveMonitoringOrchestrator

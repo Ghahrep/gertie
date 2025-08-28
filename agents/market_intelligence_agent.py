@@ -46,7 +46,9 @@ class MarketIntelligenceAgent(BaseAgentClass):
                     "trend_analysis",
                     "sentiment_analysis",
                     "timing_analysis",
-                    "debate_participation"
+                    "debate_participation",
+                    "consensus_building",
+                    "collaborative_analysis"
                 ]
             )
         else:

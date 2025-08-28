@@ -7,7 +7,7 @@ from datetime import datetime
 
 from api.schemas import AIAnalysisRequest, AutonomousAnalysisResponse
 from mcp.schemas import JobRequest, JobResponse, JobStatus
-from services.auth import get_current_user
+from api.routes.auth import get_current_user
 from services.mcp_client import MCPClient
 
 logger = logging.getLogger(__name__)

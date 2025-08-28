@@ -8,20 +8,35 @@ from datetime import datetime
 import json
 import time
 
-from mcp.schemas import (
-    AgentRegistration, 
-    AgentJobRequest, 
-    AgentJobResponse, 
-    JobStatus,
-    AgentCapability
-)
+# Try to import MCP schemas, but don't fail if not available
+try:
+    from mcp.schemas import (
+        AgentRegistration, 
+        AgentJobRequest, 
+        AgentJobResponse, 
+        JobStatus,
+        AgentCapability
+    )
+    MCP_AVAILABLE = True
+except ImportError:
+    # MCP schemas not available - use simple alternatives
+    MCP_AVAILABLE = False
+    logger = logging.getLogger(__name__)
+    logger.warning("MCP schemas not available - using simplified mode")
 
 logger = logging.getLogger(__name__)
 
 class MCPBaseAgent(ABC):
     """
-    Base class for all MCP-compatible agents.
-    Agents are stateless workers that register with MCP and respond to job requests.
+    Enhanced MCP-compatible base agent with orchestrator integration.
+    
+    Features:
+    - Full MCP compatibility when schemas available
+    - Orchestrator compatibility via run() method
+    - Autonomous data fetching
+    - Standardized error handling
+    - Health monitoring
+    - Production-ready async patterns
     """
     
     def __init__(
@@ -30,25 +45,471 @@ class MCPBaseAgent(ABC):
         agent_name: str, 
         capabilities: List[str],
         mcp_url: str = "http://localhost:8001",
-        max_concurrent_jobs: int = 5
+        max_concurrent_jobs: int = 5,
+        enable_mcp_registration: bool = False  # NEW: Control MCP registration
     ):
         self.agent_id = agent_id
         self.agent_name = agent_name
         self.capabilities = capabilities
         self.mcp_url = mcp_url
         self.max_concurrent_jobs = max_concurrent_jobs
+        self.enable_mcp_registration = enable_mcp_registration
         self.is_registered = False
         self.active_jobs: Dict[str, asyncio.Task] = {}
         
-        # Initialize HTTP session for MCP communication
+        # Enhanced logging
+        self.logger = logging.getLogger(f"agent.{agent_id}")
+        
+        # HTTP session for MCP communication (only if needed)
         self.session: Optional[aiohttp.ClientSession] = None
         
-    async def start(self):
-        """Start the agent and register with MCP"""
-        self.session = aiohttp.ClientSession()
-        await self.register_with_mcp()
-        await self.start_job_listener()
+        # Performance tracking
+        self.execution_stats = {
+            "total_requests": 0,
+            "successful_requests": 0,
+            "failed_requests": 0,
+            "avg_response_time_ms": 0.0
+        }
+    
+    # ==========================================
+    # NEW: ORCHESTRATOR COMPATIBILITY METHODS
+    # ==========================================
+    
+    async def run(self, user_query: str, context: Dict = None) -> Dict[str, Any]:
+        """
+        🔥 MAIN ENTRY POINT for orchestrator compatibility.
+        This bridges orchestrator expectations with MCP architecture.
+        """
+        if context is None:
+            context = {}
+            
+        self.logger.info(f"--- {self.agent_name} received query: '{user_query}' ---")
+        start_time = time.time()
         
+        try:
+            # Update stats
+            self.execution_stats["total_requests"] += 1
+            
+            # Determine capability from query
+            capability = self._determine_capability_from_query(user_query)
+            self.logger.info(f"Selected capability: {capability}")
+            
+            # Autonomous data enrichment (MCP feature)
+            enriched_data = await self.autonomous_data_fetch(user_query, context)
+            combined_data = {
+                "query": user_query,
+                **context,
+                **enriched_data
+            }
+            
+            # Execute capability using MCP pattern
+            result = await self.execute_capability(capability, combined_data, context)
+            
+            # Calculate execution time
+            execution_time_ms = int((time.time() - start_time) * 1000)
+            self._update_performance_stats(execution_time_ms, success=True)
+            
+            # Format for orchestrator
+            response = self._format_orchestrator_response(result, user_query, execution_time_ms)
+            self.logger.info(f"✅ Query completed successfully in {execution_time_ms}ms")
+            
+            return response
+            
+        except Exception as e:
+            execution_time_ms = int((time.time() - start_time) * 1000)
+            self._update_performance_stats(execution_time_ms, success=False)
+            
+            self.logger.error(f"❌ Query failed after {execution_time_ms}ms: {str(e)}")
+            return self._format_error_response(e, user_query)
+    
+    def _determine_capability_from_query(self, query: str) -> str:
+        """
+        🎯 Intelligent capability selection based on query content.
+        Agents can override this for custom logic.
+        """
+        query_lower = query.lower()
+        
+        # Direct capability name matches (most specific)
+        for capability in self.capabilities:
+            capability_words = capability.replace("_", " ").split()
+            if all(word in query_lower for word in capability_words):
+                return capability
+        
+        # Enhanced keyword-based matching
+        capability_keywords = {
+            # Risk & Analysis
+            "risk_analysis": ["risk", "analysis", "assess", "evaluate", "danger", "exposure"],
+            "portfolio_analysis": ["portfolio", "analyze", "review", "overall", "comprehensive"],
+            "var_analysis": ["var", "value at risk", "downside", "worst case"],
+            "stress_testing": ["stress", "test", "scenario", "crash", "crisis", "shock"],
+            "correlation_analysis": ["correlation", "relationship", "diversification", "dependency"],
+            
+            # Investment & Strategy
+            "security_screening": ["screen", "find", "recommend", "stocks", "securities", "buy"],
+            "factor_analysis": ["factor", "quality", "value", "growth", "momentum"],
+            "strategy_development": ["strategy", "approach", "plan", "systematic"],
+            "backtesting": ["backtest", "test strategy", "historical", "validate"],
+            
+            # Portfolio Management  
+            "optimization": ["optimize", "rebalance", "allocation", "weight", "efficient"],
+            "rebalancing": ["rebalance", "reweight", "adjust", "balance"],
+            "hedging": ["hedge", "protect", "volatility", "insurance", "cover"],
+            
+            # Market Analysis
+            "regime_detection": ["regime", "forecast", "transition", "change", "shift"],
+            "market_analysis": ["market", "conditions", "environment", "outlook"],
+            "scenario_simulation": ["scenario", "simulation", "what if", "simulate"],
+            
+            # Specialized
+            "tax_optimization": ["tax", "harvest", "optimization", "efficiency"],
+            "behavioral_analysis": ["bias", "behavior", "psychology", "sentiment"],
+            "economic_analysis": ["economic", "fed", "inflation", "gdp", "rates"]
+        }
+        
+        # Score each capability based on keyword matches
+        capability_scores = {}
+        for capability, keywords in capability_keywords.items():
+            if capability in self.capabilities:
+                score = sum(1 for keyword in keywords if keyword in query_lower)
+                if score > 0:
+                    capability_scores[capability] = score
+        
+        # Return highest scoring capability
+        if capability_scores:
+            best_capability = max(capability_scores.items(), key=lambda x: x[1])[0]
+            return best_capability
+        
+        # Fallback: return first capability or general analysis
+        return self.capabilities[0] if self.capabilities else "general_analysis"
+    
+    def _format_orchestrator_response(self, result: Dict, query: str, execution_time_ms: int) -> Dict[str, Any]:
+        """📋 Format MCP result for orchestrator consumption"""
+        
+        # Extract confidence score
+        confidence = result.get("confidence_score", result.get("confidence", 0.8))
+        
+        # Generate user-friendly summary
+        summary = self._generate_summary(result, query)
+        
+        # Extract recommendations
+        recommendations = self._extract_recommendations(result)
+        
+        return {
+            "success": True,
+            "summary": summary,
+            "agent_used": self.agent_name,
+            "confidence": float(min(max(confidence, 0.0), 1.0)),  # Clamp to [0,1]
+            "data": result,
+            "recommendations": recommendations,
+            "execution_time_ms": execution_time_ms,
+            "capabilities_used": [self._determine_capability_from_query(query)],
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    
+    def _format_error_response(self, error: Exception, query: str) -> Dict[str, Any]:
+        """🚨 Standardized error response format with user-friendly messages"""
+        
+        error_str = str(error).lower()
+        
+        # Categorize errors for user-friendly messages
+        if "portfolio" in error_str and ("missing" in error_str or "not found" in error_str or "required" in error_str):
+            user_message = "This analysis requires portfolio data. Please upload your portfolio first."
+            error_category = "missing_portfolio"
+        elif "data" in error_str and ("fetch" in error_str or "retrieve" in error_str):
+            user_message = "Unable to retrieve required market data. Please try again."
+            error_category = "data_fetch_error"
+        elif "timeout" in error_str:
+            user_message = "Analysis timed out. Please try a simpler query."
+            error_category = "timeout"
+        elif "capability" in error_str and ("not supported" in error_str or "unknown" in error_str):
+            available_caps = ", ".join(self.capabilities[:3])
+            user_message = f"I cannot handle that type of request. I can help with: {available_caps}..."
+            error_category = "unsupported_capability"
+        elif "network" in error_str or "connection" in error_str:
+            user_message = "Network issue encountered. Please try again."
+            error_category = "network_error"
+        else:
+            user_message = "Analysis failed due to a technical issue. Please try again or rephrase your request."
+            error_category = "general_error"
+        
+        return {
+            "success": False,
+            "error": user_message,
+            "error_category": error_category,
+            "agent_used": self.agent_name,
+            "confidence": 0.0,
+            "technical_error": str(error),  # For debugging
+            "capabilities": self.capabilities,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    
+    def _generate_summary(self, result: Dict, query: str) -> str:
+        """
+        📝 Generate user-friendly summary from MCP result.
+        Agents can override this for custom formatting.
+        """
+        # Check if result already has a summary
+        if "summary" in result and result["summary"]:
+            return result["summary"]
+        
+        # Generate basic summary based on analysis type
+        analysis_type = result.get("analysis_type", "analysis")
+        confidence = result.get("confidence_score", result.get("confidence", 0.8))
+        
+        # Create formatted summary
+        agent_type = self.agent_name.replace("Agent", "").replace("_", " ")
+        
+        summary = f"### ✅ {agent_type} Analysis Complete\n\n"
+        
+        # Add analysis-specific details
+        if "risk" in analysis_type.lower():
+            risk_level = result.get("risk_level", "moderate")
+            summary += f"**Risk Level**: {risk_level}\n"
+        elif "screening" in analysis_type.lower():
+            recommendations_count = len(result.get("recommendations", []))
+            summary += f"**Securities Found**: {recommendations_count}\n"
+        
+        summary += f"**Confidence**: {confidence:.0%}\n"
+        summary += f"**Analysis Type**: {analysis_type.replace('_', ' ').title()}"
+        
+        return summary
+    
+    def _extract_recommendations(self, result: Dict) -> List[str]:
+        """📌 Extract actionable recommendations from result"""
+        recommendations = result.get("recommendations", [])
+        
+        # Handle different recommendation formats
+        if isinstance(recommendations, list):
+            return [str(rec) for rec in recommendations[:5]]  # Limit to 5
+        elif isinstance(recommendations, dict):
+            return [f"{key}: {value}" for key, value in list(recommendations.items())[:5]]
+        elif isinstance(recommendations, str):
+            return [recommendations]
+        
+        # Generate default recommendations if none provided
+        analysis_type = result.get("analysis_type", "")
+        if "risk" in analysis_type.lower():
+            return ["Monitor portfolio risk metrics regularly", "Consider diversification if concentration is high"]
+        elif "screening" in analysis_type.lower():
+            return ["Review recommended securities for fit with your strategy"]
+        
+        return []
+    
+    def _update_performance_stats(self, execution_time_ms: int, success: bool):
+        """📊 Update performance statistics"""
+        if success:
+            self.execution_stats["successful_requests"] += 1
+        else:
+            self.execution_stats["failed_requests"] += 1
+        
+        # Update average response time
+        total_requests = self.execution_stats["total_requests"]
+        current_avg = self.execution_stats["avg_response_time_ms"]
+        self.execution_stats["avg_response_time_ms"] = (
+            (current_avg * (total_requests - 1) + execution_time_ms) / total_requests
+        )
+    
+    # ==========================================
+    # ENHANCED HEALTH CHECK SYSTEM
+    # ==========================================
+    
+    async def health_check(self) -> Dict[str, Any]:
+        """🏥 Enhanced health check with capability validation"""
+        
+        health_status = {
+            "agent_id": self.agent_id,
+            "agent_name": self.agent_name,
+            "status": "healthy",
+            "timestamp": datetime.utcnow().isoformat(),
+            "capabilities": self.capabilities,
+            "performance_stats": self.execution_stats.copy(),
+            "mcp_compatible": True,
+            "orchestrator_compatible": True
+        }
+        
+        # Test capability execution
+        capability_health = {}
+        test_timeout = 3.0  # 3 second timeout per capability
+        
+        for capability in self.capabilities[:3]:  # Test first 3 capabilities
+            try:
+                test_result = await asyncio.wait_for(
+                    self._test_capability(capability), 
+                    timeout=test_timeout
+                )
+                capability_health[capability] = "healthy" if test_result else "degraded"
+            except asyncio.TimeoutError:
+                capability_health[capability] = "timeout"
+            except Exception as e:
+                capability_health[capability] = f"error: {str(e)[:50]}"
+        
+        health_status["capability_health"] = capability_health
+        
+        # Determine overall status
+        failed_capabilities = sum(1 for status in capability_health.values() 
+                                if status not in ["healthy", "degraded"])
+        
+        if failed_capabilities == 0:
+            health_status["status"] = "healthy"
+        elif failed_capabilities < len(capability_health) / 2:
+            health_status["status"] = "degraded"
+        else:
+            health_status["status"] = "unhealthy"
+        
+        # Add response time assessment
+        avg_response = self.execution_stats["avg_response_time_ms"]
+        if avg_response > 30000:  # 30+ seconds
+            health_status["response_time_status"] = "slow"
+        elif avg_response > 10000:  # 10+ seconds  
+            health_status["response_time_status"] = "acceptable"
+        else:
+            health_status["response_time_status"] = "fast"
+        
+        return health_status
+    
+    async def _test_capability(self, capability: str) -> bool:
+        """🧪 Test capability with minimal input - agents can override"""
+        try:
+            # Default: just check if execute_capability can be called
+            test_data = {"query": "health check", "test": True}
+            test_context = {"health_check": True}
+            
+            # This should not actually execute full logic during health check
+            result = await self._health_check_capability(capability, test_data, test_context)
+            return isinstance(result, dict)
+        except Exception as e:
+            self.logger.warning(f"Capability {capability} health check failed: {str(e)}")
+            return False
+    
+    async def _health_check_capability(self, capability: str, data: Dict, context: Dict) -> Dict:
+        """🔬 Lightweight capability check - agents should override this"""
+        # Default implementation - agents should override for actual testing
+        await asyncio.sleep(0.1)  # Simulate minimal work
+        return {
+            "status": "health_check_passed",
+            "capability": capability,
+            "test_mode": True
+        }
+    
+    # ==========================================
+    # ENHANCED DATA FETCHING (FIXED TIMEOUT ISSUE)
+    # ==========================================
+    
+    async def autonomous_data_fetch(self, query: str, context: Dict) -> Dict:
+        """🤖 Enhanced autonomous data fetching with better error handling"""
+        enriched_data = {}
+        query_lower = query.lower()
+        
+        fetch_tasks = []
+        
+        # Portfolio data
+        if (("portfolio" in query_lower or "holdings" in query_lower) and 
+            not context.get("portfolio_data") and not context.get("holdings_with_values")):
+            fetch_tasks.append(("portfolio", self._safe_fetch_portfolio_data(query, context)))
+        
+        # Market data
+        if (("market" in query_lower or "price" in query_lower or "stock" in query_lower) and 
+            not context.get("market_data")):
+            fetch_tasks.append(("market", self._safe_fetch_market_data(query, context)))
+        
+        # Economic data
+        if (("economic" in query_lower or "fed" in query_lower or "interest" in query_lower) and 
+            not context.get("economic_data")):
+            fetch_tasks.append(("economic", self._safe_fetch_economic_data(query, context)))
+        
+        # News/sentiment data
+        if (("news" in query_lower or "sentiment" in query_lower) and 
+            not context.get("news_data")):
+            fetch_tasks.append(("news", self._safe_fetch_news_data(query, context)))
+        
+        # Execute fetch tasks concurrently with timeout - FIXED VERSION
+        if fetch_tasks:
+            try:
+                # FIXED: Create tasks explicitly, then use asyncio.wait()
+                created_tasks = [asyncio.create_task(task) for _, task in fetch_tasks]
+                
+                done, pending = await asyncio.wait(
+                    created_tasks,
+                    timeout=5.0,  # 5 second total timeout
+                    return_when=asyncio.ALL_COMPLETED
+                )
+                
+                # Cancel any pending tasks
+                for task in pending:
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                
+                # Process completed tasks
+                for i, task in enumerate(created_tasks):
+                    if task in done:
+                        try:
+                            result = task.result()
+                            if result and not isinstance(result, Exception):
+                                data_type = fetch_tasks[i][0]
+                                enriched_data[f"{data_type}_data"] = result
+                        except Exception as e:
+                            data_type = fetch_tasks[i][0]
+                            self.logger.warning(f"Failed to fetch {data_type} data: {str(e)}")
+                
+                if pending:
+                    self.logger.warning("Some data fetching operations timed out")
+                        
+            except Exception as e:
+                self.logger.warning(f"Error in concurrent data fetching: {str(e)}")
+        
+        if enriched_data:
+            self.logger.info(f"🔍 Autonomously enriched data: {list(enriched_data.keys())}")
+        
+        return enriched_data
+    
+    async def _safe_fetch_portfolio_data(self, query: str, context: Dict) -> Optional[Dict]:
+        """Safe portfolio data fetching with error handling"""
+        try:
+            return await self.fetch_portfolio_data(query, context)
+        except Exception as e:
+            self.logger.warning(f"Portfolio data fetch failed: {str(e)}")
+            return None
+    
+    async def _safe_fetch_market_data(self, query: str, context: Dict) -> Optional[Dict]:
+        """Safe market data fetching with error handling"""
+        try:
+            return await self.fetch_market_data(query, context)
+        except Exception as e:
+            self.logger.warning(f"Market data fetch failed: {str(e)}")
+            return None
+    
+    async def _safe_fetch_economic_data(self, query: str, context: Dict) -> Optional[Dict]:
+        """Safe economic data fetching with error handling"""
+        try:
+            return await self.fetch_economic_data(query, context)
+        except Exception as e:
+            self.logger.warning(f"Economic data fetch failed: {str(e)}")
+            return None
+    
+    async def _safe_fetch_news_data(self, query: str, context: Dict) -> Optional[Dict]:
+        """Safe news data fetching with error handling"""
+        try:
+            return await self.fetch_news_data(query, context)
+        except Exception as e:
+            self.logger.warning(f"News data fetch failed: {str(e)}")
+            return None
+    
+    # ==========================================
+    # EXISTING MCP SYSTEM METHODS (ENHANCED)
+    # ==========================================
+    
+    async def start(self):
+        """Start the agent and optionally register with MCP"""
+        if self.enable_mcp_registration and MCP_AVAILABLE:
+            self.session = aiohttp.ClientSession()
+            await self.register_with_mcp()
+            await self.start_job_listener()
+        else:
+            self.logger.info(f"🔄 Agent {self.agent_id} started in standalone mode")
+    
     async def stop(self):
         """Stop the agent and cleanup resources"""
         if self.session:
@@ -57,12 +518,17 @@ class MCPBaseAgent(ABC):
         # Cancel all active jobs
         for job_id, task in self.active_jobs.items():
             task.cancel()
-            logger.info(f"Cancelled job {job_id}")
+            self.logger.info(f"Cancelled job {job_id}")
         
-        await self.unregister_from_mcp()
-        
+        if self.is_registered:
+            await self.unregister_from_mcp()
+    
     async def register_with_mcp(self):
         """Register this agent with the Master Control Plane"""
+        if not MCP_AVAILABLE:
+            self.logger.warning("Cannot register with MCP - schemas not available")
+            return
+            
         registration = AgentRegistration(
             agent_id=self.agent_id,
             agent_name=self.agent_name,
@@ -82,17 +548,17 @@ class MCPBaseAgent(ABC):
                 if response.status == 200:
                     self.is_registered = True
                     result = await response.json()
-                    logger.info(f"✅ Agent {self.agent_id} registered successfully: {result['message']}")
+                    self.logger.info(f"✅ Agent {self.agent_id} registered successfully")
                 else:
                     error_text = await response.text()
-                    logger.error(f"❌ Failed to register agent {self.agent_id}: {error_text}")
+                    self.logger.error(f"❌ Failed to register agent {self.agent_id}: {error_text}")
                     
         except Exception as e:
-            logger.error(f"❌ Error registering agent {self.agent_id}: {str(e)}")
+            self.logger.error(f"❌ Error registering agent {self.agent_id}: {str(e)}")
     
     async def unregister_from_mcp(self):
         """Unregister this agent from the MCP"""
-        if not self.is_registered:
+        if not self.is_registered or not MCP_AVAILABLE:
             return
             
         try:
@@ -101,25 +567,22 @@ class MCPBaseAgent(ABC):
             ) as response:
                 if response.status == 200:
                     self.is_registered = False
-                    logger.info(f"✅ Agent {self.agent_id} unregistered successfully")
+                    self.logger.info(f"✅ Agent {self.agent_id} unregistered successfully")
                     
         except Exception as e:
-            logger.error(f"❌ Error unregistering agent {self.agent_id}: {str(e)}")
+            self.logger.error(f"❌ Error unregistering agent {self.agent_id}: {str(e)}")
     
     async def start_job_listener(self):
         """Start listening for job requests from MCP"""
-        # In a real implementation, this would set up a webhook endpoint or polling mechanism
-        # For now, we'll simulate with a polling mechanism
-        logger.info(f"🎧 Agent {self.agent_id} started listening for jobs")
+        self.logger.info(f"🎧 Agent {self.agent_id} started listening for jobs")
         
         while self.is_registered:
             try:
-                # Poll for new jobs (in production, use webhooks or message queue)
                 await self.check_for_new_jobs()
                 await asyncio.sleep(1)  # Poll every second
                 
             except Exception as e:
-                logger.error(f"Error in job listener for {self.agent_id}: {str(e)}")
+                self.logger.error(f"Error in job listener for {self.agent_id}: {str(e)}")
                 await asyncio.sleep(5)  # Back off on error
     
     async def check_for_new_jobs(self):
@@ -128,13 +591,16 @@ class MCPBaseAgent(ABC):
         # In production, use webhooks, message queues, or WebSocket connections
         pass  # MCP will call handle_job_request directly
     
-    async def handle_job_request(self, job_request: AgentJobRequest) -> AgentJobResponse:
+    async def handle_job_request(self, job_request) -> Any:
         """Handle a job request from the MCP"""
+        if not MCP_AVAILABLE:
+            raise RuntimeError("MCP job request received but MCP schemas not available")
+            
         start_time = time.time()
         step_id = job_request.step_id
         
         try:
-            logger.info(f"🔄 Processing job step {step_id} with capability {job_request.capability}")
+            self.logger.info(f"🔄 Processing job step {step_id} with capability {job_request.capability}")
             
             # Check if we can handle this capability
             if job_request.capability not in self.capabilities:
@@ -177,7 +643,7 @@ class MCPBaseAgent(ABC):
             
         except Exception as e:
             execution_time_ms = int((time.time() - start_time) * 1000)
-            logger.error(f"❌ Error processing step {step_id}: {str(e)}")
+            self.logger.error(f"❌ Error processing step {step_id}: {str(e)}")
             
             return AgentJobResponse(
                 step_id=step_id,
@@ -187,41 +653,16 @@ class MCPBaseAgent(ABC):
                 metadata={"agent_id": self.agent_id}
             )
     
-    async def autonomous_data_fetch(self, query: str, context: Dict) -> Dict:
-        """Agents autonomously fetch missing data based on query"""
-        enriched_data = {}
-        query_lower = query.lower()
-        
-        # Fetch portfolio data if needed and not already provided
-        if ("portfolio" in query_lower or "holdings" in query_lower) and not context.get("portfolio_data"):
-            logger.info(f"🔍 Autonomously fetching portfolio data for query: {query}")
-            portfolio_data = await self.fetch_portfolio_data(query, context)
-            if portfolio_data:
-                enriched_data["portfolio_data"] = portfolio_data
-        
-        # Fetch market data if needed and not already provided
-        if ("market" in query_lower or "price" in query_lower) and not context.get("market_data"):
-            logger.info(f"📈 Autonomously fetching market data for query: {query}")
-            market_data = await self.fetch_market_data(query, context)
-            if market_data:
-                enriched_data["market_data"] = market_data
-        
-        # Fetch economic data if needed
-        if ("economic" in query_lower or "fed" in query_lower) and not context.get("economic_data"):
-            logger.info(f"🏛️ Autonomously fetching economic data for query: {query}")
-            economic_data = await self.fetch_economic_data(query, context)
-            if economic_data:
-                enriched_data["economic_data"] = economic_data
-        
-        # Fetch news data if needed
-        if ("news" in query_lower or "sentiment" in query_lower) and not context.get("news_data"):
-            logger.info(f"📰 Autonomously fetching news data for query: {query}")
-            news_data = await self.fetch_news_data(query, context)
-            if news_data:
-                enriched_data["news_data"] = news_data
-        
-        return enriched_data
+    # ==========================================
+    # EXISTING ABSTRACT AND UTILITY METHODS
+    # ==========================================
     
+    @abstractmethod
+    async def execute_capability(self, capability: str, data: Dict, context: Dict) -> Dict:
+        """Execute a specific capability - must be implemented by subclasses"""
+        pass
+    
+    # Keep all your existing methods (fetch_portfolio_data, etc.) - they're good as-is
     async def fetch_portfolio_data(self, query: str, context: Dict) -> Optional[Dict]:
         """Fetch portfolio data from the portfolio service"""
         portfolio_id = context.get("portfolio_id")
@@ -242,7 +683,7 @@ class MCPBaseAgent(ABC):
                 "last_updated": datetime.utcnow().isoformat()
             }
         except Exception as e:
-            logger.error(f"Error fetching portfolio data: {str(e)}")
+            self.logger.error(f"Error fetching portfolio data: {str(e)}")
             return None
     
     async def fetch_market_data(self, query: str, context: Dict) -> Optional[Dict]:
@@ -262,7 +703,7 @@ class MCPBaseAgent(ABC):
                 "timestamp": datetime.utcnow().isoformat()
             }
         except Exception as e:
-            logger.error(f"Error fetching market data: {str(e)}")
+            self.logger.error(f"Error fetching market data: {str(e)}")
             return None
     
     async def fetch_economic_data(self, query: str, context: Dict) -> Optional[Dict]:
@@ -285,7 +726,7 @@ class MCPBaseAgent(ABC):
                 "timestamp": datetime.utcnow().isoformat()
             }
         except Exception as e:
-            logger.error(f"Error fetching economic data: {str(e)}")
+            self.logger.error(f"Error fetching economic data: {str(e)}")
             return None
     
     async def fetch_news_data(self, query: str, context: Dict) -> Optional[Dict]:
@@ -312,13 +753,8 @@ class MCPBaseAgent(ABC):
                 "market_sentiment": "optimistic"
             }
         except Exception as e:
-            logger.error(f"Error fetching news data: {str(e)}")
+            self.logger.error(f"Error fetching news data: {str(e)}")
             return None
-    
-    @abstractmethod
-    async def execute_capability(self, capability: str, data: Dict, context: Dict) -> Dict:
-        """Execute a specific capability - must be implemented by subclasses"""
-        pass
     
     def calculate_confidence_score(self, result: Dict) -> float:
         """Calculate confidence score for the result"""
@@ -327,7 +763,7 @@ class MCPBaseAgent(ABC):
             return 0.0
         
         # Simple confidence calculation based on data completeness
-        data_completeness = len([v for v in result.values() if v is not None]) / len(result)
+        data_completeness = len([v for v in result.values() if v is not None]) / len(result) if result else 0
         return min(0.95, 0.7 + (data_completeness * 0.25))
     
     def get_capability_version(self, capability: str) -> str:
@@ -361,7 +797,9 @@ class MCPBaseAgent(ABC):
         return {
             "version": "1.0.0",
             "startup_time": datetime.utcnow().isoformat(),
-            "supported_data_sources": self.get_supported_data_sources()
+            "supported_data_sources": self.get_supported_data_sources(),
+            "mcp_compatible": MCP_AVAILABLE,
+            "orchestrator_compatible": True
         }
     
     def get_supported_data_sources(self) -> List[str]:

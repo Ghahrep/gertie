@@ -15,8 +15,14 @@ import math
 from sqlalchemy.orm import Session
 
 # Your existing imports
-from db import crud, models
+from db.crud import (
+    get_user_portfolios,
+    get_latest_risk_snapshot, 
+    get_threshold_breaches
+)
+from db import crud
 from db.models import PortfolioRiskSnapshot, User, Portfolio, Holding
+
 
 class SuggestionType(Enum):
     AGENT_QUERY = "agent_query"
@@ -148,7 +154,21 @@ class SmartSuggestionEngine:
         unique_suggestions = self._deduplicate_suggestions(suggestions)
         ranked_suggestions = self._rank_suggestions(unique_suggestions, portfolio_context)
         
-        return ranked_suggestions[:10]  # Return top 10
+        if recent_interactions:
+            try:
+                from smart_suggestions.ml_service import enhance_suggestions_with_ml
+                ranked_suggestions = enhance_suggestions_with_ml(
+                    ranked_suggestions,  # Use ranked_suggestions, not suggestions
+                    {"user_id": user.id}, 
+                    portfolio_context, 
+                    market_context, 
+                    recent_interactions
+                )
+            except ImportError as e:
+                print(f"ML enhancement not available: {e}")
+                # Continue with regular suggestions
+            
+        return ranked_suggestions[:10] 
     
     def _generate_portfolio_suggestions(
         self, 
@@ -586,16 +606,28 @@ class SmartSuggestionEngine:
 def get_portfolio_context(db: Session, user: User) -> Optional[PortfolioContext]:
     """Extract portfolio context from database"""
     
-    # Get user's portfolios
-    portfolios = crud.get_user_portfolios(db, user.id)
+    # DEBUG: Check what's available in crud module
+    print(f"DEBUG: Available crud functions: {[attr for attr in dir(crud) if not attr.startswith('_')]}")
+    print(f"DEBUG: Has get_user_portfolios: {hasattr(crud, 'get_user_portfolios')}")
+    print(f"DEBUG: User ID: {user.id}, type: {type(user.id)}")
+    
+    try:
+        # Get user's portfolios
+        portfolios = get_user_portfolios(db, user.id)
+        print(f"DEBUG: Found {len(portfolios) if portfolios else 0} portfolios")
+    except Exception as e:
+        print(f"DEBUG: Error calling get_user_portfolios: {e}")
+        return None
+    
     if not portfolios:
+        print("DEBUG: No portfolios found, returning None")
         return None
     
     # Use the first portfolio (or implement portfolio selection logic)
     portfolio = portfolios[0]
     
     # Get latest risk snapshot
-    latest_risk = crud.get_latest_risk_snapshot(db, str(user.id), str(portfolio.id))
+    latest_risk = get_latest_risk_snapshot(db, str(user.id), str(portfolio.id))
     
     # Calculate portfolio metrics
     total_value = sum(holding.shares * (holding.purchase_price or 0) for holding in portfolio.holdings)
@@ -691,23 +723,29 @@ def _get_sector_for_ticker(ticker: str) -> str:
 # =============================================================================
 
 def generate_smart_suggestions_for_user(
-    db: Session, 
+    db: Session,
     user: User,
-    recent_interactions: List[Dict] = None
+    recent_interactions: List[Dict] = None,
+    # 1. Add this new optional argument to the function definition.
+    #    The `PortfolioContext` type hint works because it's defined in this same file.
+    portfolio_context: Optional[PortfolioContext] = None
 ) -> List[Dict[str, Any]]:
     """Main function to generate smart suggestions for a user"""
-    
-    # Get portfolio context
-    portfolio_context = get_portfolio_context(db, user)
+
+    # 2. Add this logic: Only fetch context if it wasn't already provided.
+    if not portfolio_context:
+        portfolio_context = get_portfolio_context(db, user)
+
+    # If there's still no context, then exit.
     if not portfolio_context:
         return []
-    
+
     # Get market context
     market_context = get_market_context()
-    
+
     # Initialize suggestion engine
     engine = SmartSuggestionEngine()
-    
+
     # Generate suggestions
     suggestions = engine.generate_suggestions(
         db=db,
@@ -716,7 +754,7 @@ def generate_smart_suggestions_for_user(
         market_context=market_context,
         recent_interactions=recent_interactions or []
     )
-    
+
     # Convert to API response format
     return [
         {

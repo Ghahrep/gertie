@@ -21,14 +21,45 @@ from smart_suggestions.suggestion_engine import (
     get_portfolio_context,
     get_market_context
 )
+from pydantic import BaseModel, Field
+from typing import List, Dict, Any, Optional
 
 router = APIRouter()
+
+class SuggestionResponse(BaseModel):
+    id: str
+    type: str
+    title: str
+    description: str
+    query: str
+    target_agent: Optional[str] = None
+    workflow_type: Optional[str] = None
+    confidence: float
+    urgency: str
+    category: str
+    reasoning: str
+    expected_outcome: str
+    icon: str
+    color: str
+    metadata: Optional[Dict[str, Any]] = None
+
+class ContextResponse(BaseModel):
+    # Define the structure for your context if you want stronger typing
+    portfolio: Dict[str, Any]
+    market: Dict[str, Any]
+    ab_testing: Optional[Dict[str, Any]] = None
+
+class SuggestionsApiResponse(BaseModel):
+    suggestions: List[SuggestionResponse]
+    total_count: int
+    generated_at: datetime
+    context: Optional[ContextResponse] = None
 
 # =============================================================================
 # SMART SUGGESTIONS ENDPOINTS
 # =============================================================================
 
-@router.get("/suggestions", response_model=List[Dict[str, Any]], tags=["Smart Suggestions"])
+@router.get("/suggestions", response_model=SuggestionsApiResponse, tags=["Smart Suggestions"])
 async def get_smart_suggestions(
     include_context: bool = Query(True, description="Include portfolio and market context in response"),
     limit: int = Query(10, ge=1, le=20, description="Maximum number of suggestions to return"),
@@ -48,38 +79,73 @@ async def get_smart_suggestions(
     """
     
     try:
-        # Get recent user interactions from session/logs (simplified for demo)
+        from smart_suggestions.realtime_context_service import get_realtime_context_service
+        from smart_suggestions.ab_testing_service import get_ab_testing_service, apply_ab_testing_to_suggestions
+        
+        # --- FIX 3: Fetch context ONCE to avoid redundant database calls ---
+        portfolio_context = get_portfolio_context(db, current_user)
         recent_interactions = _get_recent_user_interactions(db, current_user.id)
         
-        # Generate suggestions
-        suggestions = generate_smart_suggestions_for_user(
+        # NOTE: Assumes generate_smart_suggestions_for_user is updated to accept portfolio_context
+        # to prevent its own internal fetch, as recommended in the review.
+        all_suggestions = generate_smart_suggestions_for_user(
             db=db,
             user=current_user,
-            recent_interactions=recent_interactions
+            recent_interactions=recent_interactions,
+            portfolio_context=portfolio_context
         )
         
-        # Apply filters
+        # Apply A/B testing variants (check for active tests)
+        # (This logic can be further optimized, but is functionally okay for now)
+        ab_service = get_ab_testing_service()
+        if ab_service.active_tests:
+            user_active_tests = [
+                test_id for test_id in ab_service.active_tests.keys()
+                if ab_service.assign_user_to_variant(test_id, str(current_user.id))
+            ]
+            
+            if user_active_tests:
+                from smart_suggestions.suggestion_engine import SmartSuggestion, SuggestionType, Urgency
+                from dataclasses import asdict
+                
+                suggestion_objects = [
+                    SmartSuggestion(**{**s, 'type': SuggestionType(s['type']), 'urgency': Urgency(s['urgency'])})
+                    for s in all_suggestions
+                ]
+                
+                enhanced_suggestions = apply_ab_testing_to_suggestions(
+                    suggestion_objects, str(current_user.id), user_active_tests
+                )
+                
+                # Convert back to dict format
+                all_suggestions = [
+                    {**asdict(s), 'type': s.type.value, 'urgency': s.urgency.value}
+                    for s in enhanced_suggestions
+                ]
+
+        # --- FIX 2: Apply filters BEFORE limiting the results for correctness ---
+        filtered_suggestions = all_suggestions
         if category_filter:
-            suggestions = [s for s in suggestions if s['category'].lower() == category_filter.lower()]
+            filtered_suggestions = [s for s in filtered_suggestions if s['category'].lower() == category_filter.lower()]
         
         if urgency_filter:
-            suggestions = [s for s in suggestions if s['urgency'] == urgency_filter.lower()]
+            filtered_suggestions = [s for s in filtered_suggestions if s['urgency'] == urgency_filter.lower()]
         
-        # Limit results
-        suggestions = suggestions[:limit]
+        # Apply the final limit AFTER filtering
+        final_suggestions = filtered_suggestions[:limit]
         
-        # Add context if requested
-        response = {
-            "suggestions": suggestions,
-            "total_count": len(suggestions),
-            "generated_at": datetime.now().isoformat()
+        # Build the response object that will be validated by the response_model
+        response_data = {
+            "suggestions": final_suggestions,
+            "total_count": len(final_suggestions),
+            "generated_at": datetime.now()
         }
         
+        # Add context if requested, REUSING the context object from the start
         if include_context:
-            portfolio_context = get_portfolio_context(db, current_user)
             market_context = get_market_context()
             
-            response["context"] = {
+            response_data["context"] = {
                 "portfolio": {
                     "risk_score": portfolio_context.risk_score if portfolio_context else None,
                     "total_value": portfolio_context.total_value if portfolio_context else None,
@@ -91,11 +157,29 @@ async def get_smart_suggestions(
                     "volatility_regime": market_context.volatility_regime
                 }
             }
+            
+            if ab_service.active_tests:
+                response_data["context"]["ab_testing"] = {
+                    "active_tests": len(ab_service.active_tests),
+                    "user_assignments": ab_service.user_assignments.get(str(current_user.id), {})
+                }
         
-        return response
+        # Send real-time context update (non-blocking)
+        try:
+            realtime_service = get_realtime_context_service()
+            await realtime_service.update_dashboard_state(str(current_user.id), {
+                "current_view": category_filter or "general",
+                "visible_metrics": {"suggestion_request": True},
+                "active_widgets": ["suggestions"],
+                "time_range": "current"
+            })
+        except Exception as context_error:
+            print(f"Warning: Real-time context update failed: {context_error}")
+            
+        return response_data
         
     except Exception as e:
-        print(f"❌ Error generating suggestions: {e}")
+        print(f"Error generating suggestions: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to generate suggestions: {str(e)}")
 
 @router.post("/suggestions/execute", tags=["Smart Suggestions"])
@@ -542,6 +626,47 @@ def _generate_dashboard_widget_suggestions(
         ])
     
     return suggestions
+
+@router.get("/admin/ab-tests", tags=["A/B Testing"])
+async def list_ab_tests(current_user: User = Depends(get_current_user)):
+    """List all A/B tests"""
+    try:
+        from smart_suggestions.ab_testing_service import get_ab_testing_service
+        ab_service = get_ab_testing_service()
+        
+        active_tests = {test_id: ab_service.get_test_analytics(test_id) 
+                       for test_id in ab_service.active_tests.keys()}
+        completed_tests = {test_id: ab_service.get_test_analytics(test_id) 
+                          for test_id in ab_service.completed_tests.keys()}
+        
+        return {
+            "active_tests": active_tests,
+            "completed_tests": completed_tests,
+            "system_analytics": ab_service.get_global_analytics_dashboard()
+        }
+    except Exception as e:
+        return {"error": str(e), "active_tests": {}, "completed_tests": {}}
+
+@router.post("/admin/ab-tests", tags=["A/B Testing"])
+async def create_ab_test(
+    test_config: Dict[str, Any],
+    current_user: User = Depends(get_current_user)
+):
+    """Create new A/B test"""
+    try:
+        from smart_suggestions.ab_testing_service import get_ab_testing_service
+        ab_service = get_ab_testing_service()
+        
+        test = ab_service.create_suggestion_variant_test(
+            test_name=test_config["name"],
+            description=test_config["description"],
+            variants=test_config["variants"],
+            duration_days=test_config.get("duration_days", 14)
+        )
+        
+        return {"status": "success", "test_id": test.test_id}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
 
 # =============================================================================
 # MAIN.PY INTEGRATION

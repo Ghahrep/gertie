@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta
+import uuid
 
 from api.contextual_chat import (
     ContextualChatService, 
@@ -20,7 +21,16 @@ from api.routes.auth import get_current_user
 from db.session import get_db
 
 # Initialize the contextual chat service
-contextual_chat_service = ContextualChatService()
+contextual_chat_service = None
+
+def get_contextual_chat_service():
+    """Get the contextual chat service instance"""
+    global contextual_chat_service
+    if contextual_chat_service is None:
+        # Import here to avoid circular imports
+        from main import orchestrator
+        contextual_chat_service = ContextualChatService(orchestrator=orchestrator)
+    return contextual_chat_service
 
 # Router for contextual chat endpoints
 router = APIRouter(prefix="/chat", tags=["Contextual Chat"])
@@ -39,7 +49,8 @@ async def send_chat_message(
     """
     
     try:
-        response = await contextual_chat_service.process_contextual_chat(
+        service = get_contextual_chat_service()
+        response = await service.process_contextual_chat(
             request, current_user, db
         )
         
@@ -64,7 +75,8 @@ async def get_conversation_history(
     """
     
     try:
-        conversation_context = contextual_chat_service.conversation_manager.get_conversation_context(
+        service = get_contextual_chat_service()
+        conversation_context = service.conversation_manager.get_conversation_context(
             conversation_id
         )
         
@@ -99,10 +111,11 @@ async def get_user_conversations(
     """
     
     try:
+        service = get_contextual_chat_service()
         # Filter conversations for this user
         user_conversations = []
         
-        for conv_id, context in contextual_chat_service.conversation_manager.conversations.items():
+        for conv_id, context in service.conversation_manager.conversations.items():
             # You would normally check user ownership here
             # For now, we'll return all conversations (implement user filtering in production)
             
@@ -148,7 +161,8 @@ async def update_conversation_context(
     """
     
     try:
-        contextual_chat_service.conversation_manager.update_conversation_context(
+        service = get_contextual_chat_service()
+        service.conversation_manager.update_conversation_context(
             conversation_id, context_update
         )
         
@@ -176,8 +190,9 @@ async def delete_conversation(
     """
     
     try:
-        if conversation_id in contextual_chat_service.conversation_manager.conversations:
-            del contextual_chat_service.conversation_manager.conversations[conversation_id]
+        service = get_contextual_chat_service()
+        if conversation_id in service.conversation_manager.conversations:
+            del service.conversation_manager.conversations[conversation_id]
             
             return {
                 "status": "deleted",
@@ -209,6 +224,7 @@ async def quick_portfolio_analysis(
     """
     
     try:
+        service = get_contextual_chat_service()
         # Create a quick analysis request
         request = ContextualChatRequest(
             message=query,
@@ -217,7 +233,7 @@ async def quick_portfolio_analysis(
             max_response_time=15  # 15 seconds for quick analysis
         )
         
-        response = await contextual_chat_service.process_contextual_chat(
+        response = await service.process_contextual_chat(
             request, current_user, db
         )
         
@@ -308,6 +324,7 @@ async def use_chat_template(
     """
     
     try:
+        service = get_contextual_chat_service()
         # Get template configuration
         templates_response = await get_chat_templates()
         template = templates_response["templates"].get(template_id)
@@ -335,7 +352,7 @@ async def use_chat_template(
             analysis_depth=template["analysis_depth"]
         )
         
-        response = await contextual_chat_service.process_contextual_chat(
+        response = await service.process_contextual_chat(
             request, current_user, db
         )
         
@@ -358,8 +375,9 @@ async def get_agent_capabilities():
     """
     
     try:
+        service = get_contextual_chat_service()
         # Get agent capabilities from orchestrator
-        orchestrator = contextual_chat_service.orchestrator
+        orchestrator = service.orchestrator
         
         # This would typically come from your agent registry
         agent_capabilities = {
@@ -446,6 +464,7 @@ async def get_chat_analytics(
     """
     
     try:
+        service = get_contextual_chat_service()
         # Mock analytics data - implement actual tracking in production
         cutoff_date = datetime.now() - timedelta(days=days)
         
@@ -510,8 +529,9 @@ async def submit_chat_feedback(
     """
     
     try:
+        service = get_contextual_chat_service()
         # Validate conversation exists
-        conversation_context = contextual_chat_service.conversation_manager.get_conversation_context(
+        conversation_context = service.conversation_manager.get_conversation_context(
             conversation_id
         )
         
@@ -561,6 +581,7 @@ async def get_portfolio_context_summary(
     """
     
     try:
+        service = get_contextual_chat_service()
         # Verify portfolio ownership
         from db import crud
         user_portfolios = crud.get_user_portfolios(db=db, user_id=current_user.id)
@@ -619,8 +640,9 @@ async def optimize_context_settings(
     """
     
     try:
+        service = get_contextual_chat_service()
         # Store user's context optimization preferences
-        contextual_chat_service.conversation_manager.user_preferences[current_user.id] = {
+        service.conversation_manager.user_preferences[current_user.id] = {
             "context_optimization": optimization_preferences,
             "updated_at": datetime.now().isoformat()
         }
@@ -668,14 +690,15 @@ async def chat_service_health():
     """
     
     try:
+        service = get_contextual_chat_service()
         # Check orchestrator health
-        orchestrator_healthy = hasattr(contextual_chat_service.orchestrator, 'roster')
+        orchestrator_healthy = hasattr(service.orchestrator, 'agents') or hasattr(service.orchestrator, 'roster')
         
         # Check conversation manager
-        conversation_manager_healthy = contextual_chat_service.conversation_manager is not None
+        conversation_manager_healthy = service.conversation_manager is not None
         
         # Check active conversations
-        active_conversations = len(contextual_chat_service.conversation_manager.conversations)
+        active_conversations = len(service.conversation_manager.conversations)
         
         health_status = {
             "status": "healthy" if (orchestrator_healthy and conversation_manager_healthy) else "degraded",
@@ -687,8 +710,8 @@ async def chat_service_health():
             },
             "metrics": {
                 "active_conversations": active_conversations,
-                "cached_contexts": len(contextual_chat_service.conversation_manager.context_cache),
-                "user_preferences": len(contextual_chat_service.conversation_manager.user_preferences)
+                "cached_contexts": len(service.conversation_manager.context_cache),
+                "user_preferences": len(service.conversation_manager.user_preferences)
             },
             "capabilities": {
                 "multi_agent_orchestration": orchestrator_healthy,
@@ -708,8 +731,5 @@ async def chat_service_health():
             "timestamp": datetime.now().isoformat()
         }
 
-# Import uuid for feedback function
-import uuid
-
 # Export router for main application
-__all__ = ["router", "contextual_chat_service"]
+__all__ = ["router", "get_contextual_chat_service"]

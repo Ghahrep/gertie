@@ -28,21 +28,39 @@ def event_loop():
 @pytest.fixture(autouse=True)
 def clean_registries():
     """Clean up global registries before each test"""
-    from mcp.server import agent_registry, workflow_engine
-    
-    # Clear agent registry
-    agent_registry.clear()
-    
-    # Clean workflow engine jobs
-    workflow_engine.jobs.clear()
-    workflow_engine.active_jobs.clear()
+    try:
+        from mcp.server import workflow_engine
+        from mcp.enhanced_agent_registry import enhanced_registry
+        
+        # Clear workflow engine jobs
+        if hasattr(workflow_engine, 'jobs'):
+            workflow_engine.jobs.clear()
+        if hasattr(workflow_engine, 'active_jobs'):
+            workflow_engine.active_jobs.clear()
+        
+        # Clear enhanced registry manually since it doesn't have a clear method
+        enhanced_registry.agents.clear()
+        enhanced_registry.metrics.clear()
+            
+    except ImportError:
+        pass
     
     yield
     
     # Clean up after test
-    agent_registry.clear()
-    workflow_engine.jobs.clear()
-    workflow_engine.active_jobs.clear()
+    try:
+        from mcp.server import workflow_engine
+        from mcp.enhanced_agent_registry import enhanced_registry
+        
+        if hasattr(workflow_engine, 'jobs'):
+            workflow_engine.jobs.clear()
+        if hasattr(workflow_engine, 'active_jobs'):
+            workflow_engine.active_jobs.clear()
+            
+        enhanced_registry.agents.clear()
+        enhanced_registry.metrics.clear()
+    except ImportError:
+        pass
 
 @pytest.fixture
 def mock_agent_endpoint():

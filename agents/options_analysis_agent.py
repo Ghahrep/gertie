@@ -31,7 +31,9 @@ class OptionsAnalysisAgent(MCPBaseAgent):
                 "volatility_analysis",
                 "strategy_recommendation",
                 "portfolio_risk_analysis", # New capability
-                "debate_participation"
+                "debate_participation",
+                "consensus_building",
+                "collaborative_analysis"
             ]
         )
         self.specialization = "options_strategy_and_risk_management"

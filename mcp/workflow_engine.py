@@ -43,9 +43,11 @@ class Job:
 class WorkflowEngine:
     """Core engine for managing and executing multi-step analysis workflows"""
     
-    def __init__(self):
+    def __init__(self, agent_registry=None, app_state=None):
         self.jobs: Dict[str, Job] = {}
         self.active_jobs: Dict[str, asyncio.Task] = {}
+        self.agent_registry = agent_registry  # Reference to enhanced_registry
+        self.app_state = app_state  # Reference to FastAPI app.state for MCP agents
         
     def create_job(self, job_id: str, request: JobRequest, assigned_agents: List[str]) -> Job:
         """Create a new job with workflow steps"""
@@ -110,7 +112,7 @@ class WorkflowEngine:
             # Execute all steps at this level in parallel
             tasks = []
             for step in steps:
-                task = asyncio.create_task(self._execute_step(step))
+                task = asyncio.create_task(self._execute_step(step, job.request.context))
                 tasks.append(task)
             
             # Wait for all steps at this level to complete
@@ -146,27 +148,130 @@ class WorkflowEngine:
         job.status_message = "Workflow completed successfully"
         logger.info(f"Job {job.job_id} completed successfully")
     
-    async def _execute_step(self, step: WorkflowStep) -> Dict[str, Any]:
-        """Execute a single workflow step"""
+    async def _execute_step(self, step: WorkflowStep, job_context: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute a single workflow step with real agent calls"""
         step.status = JobStatus.RUNNING
         step.started_at = datetime.utcnow()
         
-        # Simulate agent communication and processing
-        # In a real implementation, this would communicate with actual agents
-        await asyncio.sleep(0.5)  # Simulate processing time
+        try:
+            # Check if this is an MCP agent (stored in app.state)
+            if self.app_state and hasattr(self.app_state, 'agent_instances') and step.agent_id in self.app_state.agent_instances:
+                return await self._execute_mcp_agent_step(step, job_context)
+            
+            # Check if this is a registry agent (HTTP endpoint)
+            elif self.agent_registry and step.agent_id in self.agent_registry.agents:
+                return await self._execute_registry_agent_step(step, job_context)
+            
+            # Fallback to mock for unknown agents
+            else:
+                logger.warning(f"Unknown agent {step.agent_id}, using mock result")
+                await asyncio.sleep(0.1)  # Brief delay
+                return self._generate_mock_result(step.capability, step.input_data)
         
-        # Mock result based on capability
-        mock_result = self._generate_mock_result(step.capability, step.input_data)
+        except Exception as e:
+            logger.error(f"Error executing step {step.step_id}: {str(e)}")
+            raise e
+    
+    async def _execute_mcp_agent_step(self, step: WorkflowStep, job_context: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute a step using an MCP agent instance"""
+        agent = self.app_state.agent_instances[step.agent_id]
         
-        logger.info(f"Step {step.step_id} ({step.capability}) completed")
-        return mock_result
+        # Prepare data and context for the agent
+        data = {
+            "query": step.input_data.get("query", ""),
+            **step.input_data
+        }
+        context = {
+            **job_context,
+            "workflow_step_id": step.step_id
+        }
+        
+        logger.info(f"Executing MCP agent {step.agent_id} capability {step.capability}")
+        
+        # Execute the capability
+        result = await agent.execute_capability(step.capability, data, context)
+        
+        logger.info(f"MCP agent {step.agent_id} completed capability {step.capability}")
+        return result
+    
+    async def _execute_registry_agent_step(self, step: WorkflowStep, job_context: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute a step using a registry agent (HTTP endpoint)"""
+        import httpx
+        
+        agent_info = self.agent_registry.agents[step.agent_id]
+        endpoint_url = agent_info.endpoint_url
+        
+        if not endpoint_url:
+            logger.warning(f"No endpoint URL for agent {step.agent_id}, using mock result")
+            return self._generate_mock_result(step.capability, step.input_data)
+        
+        # Prepare request payload
+        payload = {
+            "capability": step.capability,
+            "data": step.input_data,
+            "context": job_context
+        }
+        
+        logger.info(f"Calling registry agent {step.agent_id} at {endpoint_url}")
+        
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    endpoint_url,
+                    json=payload,
+                    timeout=30.0
+                )
+                
+                if response.status_code == 200:
+                    return response.json()
+                else:
+                    logger.error(f"Agent {step.agent_id} returned {response.status_code}")
+                    return self._generate_mock_result(step.capability, step.input_data)
+        
+        except Exception as e:
+            logger.error(f"Error calling agent {step.agent_id}: {str(e)}")
+            return self._generate_mock_result(step.capability, step.input_data)
     
     def _generate_workflow_steps(self, request: JobRequest, assigned_agents: List[str]) -> List[WorkflowStep]:
         """Generate workflow steps based on the request and available agents"""
         steps = []
         query_lower = request.query.lower()
         
-        # Step 1: Data collection (always first)
+        # NEW: Enhanced step generation for SecurityScreener capabilities
+        if any(pattern in query_lower for pattern in ["screen", "stocks", "quality", "value", "factor"]):
+            # Direct screening step - no dependencies needed
+            security_screener = self._find_agent_with_capability(assigned_agents, "security_screening")
+            if security_screener:
+                steps.append(WorkflowStep(
+                    step_id="security_screening",
+                    agent_id=security_screener,
+                    capability="security_screening",
+                    input_data={"query": request.query}
+                ))
+        
+        # Factor analysis step
+        if "factor" in query_lower or "quality" in query_lower or "value" in query_lower:
+            factor_agent = self._find_agent_with_capability(assigned_agents, "factor_analysis")
+            if factor_agent:
+                steps.append(WorkflowStep(
+                    step_id="factor_analysis",
+                    agent_id=factor_agent,
+                    capability="factor_analysis",
+                    input_data={"query": request.query}
+                ))
+        
+        # Portfolio complement analysis
+        if "complement" in query_lower and ("portfolio" in query_lower or request.context.get("portfolio_id")):
+            complement_agent = self._find_agent_with_capability(assigned_agents, "portfolio_complement_analysis")
+            if complement_agent:
+                steps.append(WorkflowStep(
+                    step_id="portfolio_complement",
+                    agent_id=complement_agent,
+                    capability="portfolio_complement_analysis",
+                    input_data={"query": request.query}
+                ))
+        
+        # Legacy workflow steps (keep existing logic)
         if "portfolio" in query_lower or "holdings" in query_lower:
             steps.append(WorkflowStep(
                 step_id="data_collection_portfolio",
@@ -183,47 +288,17 @@ class WorkflowEngine:
                 input_data={"query": request.query}
             ))
         
-        # Step 2: Analysis steps (depend on data collection)
-        data_deps = [s.step_id for s in steps]  # All data collection steps
-        
-        if "risk" in query_lower:
+        # If no specific steps generated, create a default analysis step
+        if not steps:
+            default_agent = assigned_agents[0] if assigned_agents else "default"
             steps.append(WorkflowStep(
-                step_id="risk_analysis",
-                agent_id=self._find_agent_with_capability(assigned_agents, "risk_analysis"),
-                capability="risk_analysis",
-                input_data={"query": request.query},
-                dependencies=data_deps
+                step_id="general_analysis",
+                agent_id=default_agent,
+                capability="general_analysis",
+                input_data={"query": request.query}
             ))
         
-        if "tax" in query_lower:
-            steps.append(WorkflowStep(
-                step_id="tax_optimization",
-                agent_id=self._find_agent_with_capability(assigned_agents, "tax_optimization"),
-                capability="tax_optimization",
-                input_data={"query": request.query},
-                dependencies=data_deps
-            ))
-        
-        if "rebalance" in query_lower:
-            steps.append(WorkflowStep(
-                step_id="rebalancing_analysis",
-                agent_id=self._find_agent_with_capability(assigned_agents, "strategy_rebalancing"),
-                capability="strategy_rebalancing",
-                input_data={"query": request.query},
-                dependencies=data_deps
-            ))
-        
-        # Step 3: Synthesis (depends on all analysis steps)
-        analysis_deps = [s.step_id for s in steps if s.step_id not in data_deps]
-        if analysis_deps:
-            steps.append(WorkflowStep(
-                step_id="result_synthesis",
-                agent_id=assigned_agents[0] if assigned_agents else "default",
-                capability="result_synthesis",
-                input_data={"query": request.query},
-                dependencies=analysis_deps
-            ))
-        
+        logger.info(f"Generated {len(steps)} workflow steps: {[s.step_id for s in steps]}")
         return steps
     
     def _organize_steps_by_dependencies(self, steps: List[WorkflowStep]) -> Dict[int, List[WorkflowStep]]:
@@ -257,14 +332,30 @@ class WorkflowEngine:
         
         return step_levels
     
-    def _find_agent_with_capability(self, agents: List[str], capability: str) -> str:
+    def _find_agent_with_capability(self, agents: List[str], capability: str) -> Optional[str]:
         """Find the best agent for a specific capability"""
-        # In a real implementation, this would check agent registrations
-        return agents[0] if agents else "default_agent"
+        # Check MCP agents first
+        if self.app_state and hasattr(self.app_state, 'agent_instances'):
+            for agent_id in agents:
+                if agent_id in self.app_state.agent_instances:
+                    agent = self.app_state.agent_instances[agent_id]
+                    if hasattr(agent, 'capabilities') and capability in agent.capabilities:
+                        return agent_id
+        
+        # Check registry agents
+        if self.agent_registry:
+            for agent_id in agents:
+                if agent_id in self.agent_registry.agents:
+                    agent_info = self.agent_registry.agents[agent_id]
+                    if capability in agent_info.capabilities:
+                        return agent_id
+        
+        # Return first agent as fallback
+        return agents[0] if agents else None
     
     def _has_critical_failures(self, failed_steps: List[WorkflowStep]) -> bool:
         """Determine if failed steps are critical to the workflow"""
-        critical_capabilities = ["portfolio_data_fetch", "result_synthesis"]
+        critical_capabilities = ["portfolio_data_fetch", "result_synthesis", "security_screening"]
         return any(step.capability in critical_capabilities for step in failed_steps)
     
     def _consolidate_workflow_results(self, steps: List[WorkflowStep]) -> Dict[str, Any]:
@@ -277,27 +368,21 @@ class WorkflowEngine:
             },
             "results": {},
             "recommendations": [],
-            "confidence_score": 0.85  # Mock confidence score
+            "confidence_score": 0.85
         }
         
         for step in steps:
             if step.status == JobStatus.COMPLETED and step.result:
                 consolidated["results"][step.capability] = step.result
-        
-        # Generate summary recommendations based on results
-        if "risk_analysis" in consolidated["results"]:
-            consolidated["recommendations"].append({
-                "type": "risk_management",
-                "priority": "high",
-                "description": "Consider reducing portfolio volatility by 15%"
-            })
-        
-        if "tax_optimization" in consolidated["results"]:
-            consolidated["recommendations"].append({
-                "type": "tax_strategy",
-                "priority": "medium",
-                "description": "Implement tax-loss harvesting to reduce tax burden"
-            })
+                
+                # Extract recommendations from MCP agent results
+                if isinstance(step.result, dict):
+                    if "recommendations" in step.result:
+                        consolidated["recommendations"].extend(step.result["recommendations"])
+                    elif "screening_results" in step.result:
+                        screening_results = step.result["screening_results"]
+                        if isinstance(screening_results, dict) and "recommendations" in screening_results:
+                            consolidated["recommendations"].extend(screening_results["recommendations"])
         
         return consolidated
     
@@ -309,27 +394,30 @@ class WorkflowEngine:
             "input_query": input_data.get("query", ""),
         }
         
-        if capability == "risk_analysis":
+        if capability == "security_screening":
+            base_result.update({
+                "screening_type": "factor_based",
+                "universe_screened": 500,
+                "recommendations": [
+                    {"ticker": "AAPL", "score": 0.87, "rationale": "High quality, reasonable valuation"},
+                    {"ticker": "MSFT", "score": 0.84, "rationale": "Strong fundamentals, growth potential"},
+                    {"ticker": "GOOGL", "score": 0.82, "rationale": "Quality business, attractive value metrics"}
+                ]
+            })
+        elif capability == "factor_analysis":
+            base_result.update({
+                "factors_analyzed": ["quality", "value", "growth"],
+                "top_securities": [
+                    {"ticker": "JPM", "quality_score": 0.91, "value_score": 0.78},
+                    {"ticker": "BRK.B", "quality_score": 0.89, "value_score": 0.85}
+                ]
+            })
+        elif capability == "risk_analysis":
             base_result.update({
                 "var_95": 0.024,
                 "max_drawdown": 0.187,
                 "sharpe_ratio": 1.34,
                 "risk_grade": "Moderate"
-            })
-        elif capability == "tax_optimization":
-            base_result.update({
-                "potential_tax_savings": 3420.50,
-                "recommended_harvesting": ["TSLA: -$1,200", "NVDA: -$2,220"],
-                "optimal_asset_location": "Move bonds to 401k, growth stocks to Roth"
-            })
-        elif capability == "strategy_rebalancing":
-            base_result.update({
-                "rebalancing_needed": True,
-                "target_allocations": {"stocks": 0.70, "bonds": 0.25, "cash": 0.05},
-                "trades_required": [
-                    {"symbol": "VTI", "action": "sell", "shares": 50},
-                    {"symbol": "BND", "action": "buy", "shares": 100}
-                ]
             })
         
         return base_result
